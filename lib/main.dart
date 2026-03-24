@@ -52,7 +52,6 @@ class _MainScreenState extends State<MainScreen> {
       const ProfilePage(),
     ];
 
-<<<<<<< HEAD
     bleMeshService.init().catchError((_) => null);
     bleScannerService.init().catchError((_) => null);
     networkSyncService.startListening().catchError((_) => null);
@@ -60,15 +59,6 @@ class _MainScreenState extends State<MainScreen> {
       message,
     ) {
       appDb.saveIncomingSos(message).catchError((_) => null);
-=======
-    bleMeshService.init().catchError((_) {});
-    bleScannerService.init().catchError((_) {});
-    networkSyncService.startListening().catchError((_) {});
-    _incomingSosSubscription = bleScannerService.sosMessageStream.listen((
-      message,
-    ) {
-      appDb.saveIncomingSos(message).catchError((_) {});
->>>>>>> 269523386e01298e8124e2d5e7fe1cc2f78937a3
     });
   }
 
