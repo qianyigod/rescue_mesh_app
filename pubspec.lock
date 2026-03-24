@@ -278,6 +278,7 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+<<<<<<< HEAD
   flutter_background_service:
     dependency: "direct main"
     description:
@@ -310,6 +311,8 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "5.1.2"
+=======
+>>>>>>> 269523386e01298e8124e2d5e7fe1cc2f78937a3
   flutter_blue_plus:
     dependency: "direct main"
     description:
@@ -366,6 +369,7 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "3.0.2"
+<<<<<<< HEAD
   flutter_local_notifications:
     dependency: "direct main"
     description:
@@ -390,6 +394,8 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "7.2.0"
+=======
+>>>>>>> 269523386e01298e8124e2d5e7fe1cc2f78937a3
   flutter_map:
     dependency: "direct main"
     description:
@@ -1021,6 +1027,7 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "0.7.10"
+<<<<<<< HEAD
   timezone:
     dependency: transitive
     description:
@@ -1029,6 +1036,8 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "0.9.4"
+=======
+>>>>>>> 269523386e01298e8124e2d5e7fe1cc2f78937a3
   typed_data:
     dependency: transitive
     description:

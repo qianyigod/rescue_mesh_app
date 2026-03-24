@@ -24,9 +24,12 @@ dependencies:
   connectivity_plus: ^6.0.3
   http: ^1.2.1
   shared_preferences: ^2.3.2
+<<<<<<< HEAD
   # 后台服务保活
   flutter_background_service: ^5.0.5
   flutter_local_notifications: ^17.2.1
+=======
+>>>>>>> 269523386e01298e8124e2d5e7fe1cc2f78937a3
 
 dev_dependencies:
   flutter_test:
