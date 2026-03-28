@@ -7,6 +7,7 @@ import 'database.dart';
 import 'mesh_dashboard_page.dart';
 import 'message_page.dart';
 import 'profile_page.dart';
+import 'radar_demo_page.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
 import 'services/network_sync_service.dart';
@@ -33,7 +34,7 @@ class RescueApp extends StatelessWidget {
   }
 }
 
-enum _MainTab { dashboard, ai, message, profile }
+enum _MainTab { dashboard, radar, ai, message, profile }
 
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
@@ -78,6 +79,7 @@ class _MainScreenState extends State<MainScreen> {
       builder: (context, _) {
         final visibleTabs = <_MainTab>[
           _MainTab.dashboard,
+          _MainTab.radar,
           if (powerSavingManager.shouldEnableLocalAi()) _MainTab.ai,
           _MainTab.message,
           _MainTab.profile,
@@ -137,24 +139,30 @@ class _MainScreenState extends State<MainScreen> {
               });
             },
             items: visibleTabs
-                .map((tab) => switch (tab) {
-                      _MainTab.dashboard => const BottomNavigationBarItem(
-                        icon: Icon(Icons.dashboard),
-                        label: '首页',
-                      ),
-                      _MainTab.ai => const BottomNavigationBarItem(
-                        icon: Icon(Icons.medical_services),
-                        label: 'AI 助手',
-                      ),
-                      _MainTab.message => const BottomNavigationBarItem(
-                        icon: Icon(Icons.message),
-                        label: '记录',
-                      ),
-                      _MainTab.profile => const BottomNavigationBarItem(
-                        icon: Icon(Icons.person),
-                        label: '资料',
-                      ),
-                    })
+                .map(
+                  (tab) => switch (tab) {
+                    _MainTab.dashboard => const BottomNavigationBarItem(
+                      icon: Icon(Icons.dashboard),
+                      label: '首页',
+                    ),
+                    _MainTab.radar => const BottomNavigationBarItem(
+                      icon: Icon(Icons.radar),
+                      label: '雷达',
+                    ),
+                    _MainTab.ai => const BottomNavigationBarItem(
+                      icon: Icon(Icons.medical_services),
+                      label: 'AI 助手',
+                    ),
+                    _MainTab.message => const BottomNavigationBarItem(
+                      icon: Icon(Icons.message),
+                      label: '记录',
+                    ),
+                    _MainTab.profile => const BottomNavigationBarItem(
+                      icon: Icon(Icons.person),
+                      label: '资料',
+                    ),
+                  },
+                )
                 .toList(),
           ),
         );
@@ -165,6 +173,7 @@ class _MainScreenState extends State<MainScreen> {
   Widget _buildPage(_MainTab tab) {
     return switch (tab) {
       _MainTab.dashboard => MeshDashboardPage(),
+      _MainTab.radar => const RadarDemoPage(),
       _MainTab.ai => const AiChatPage(),
       _MainTab.message => const MessagePage(),
       _MainTab.profile => const ProfilePage(),

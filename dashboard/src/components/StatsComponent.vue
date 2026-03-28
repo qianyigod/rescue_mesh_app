@@ -1,7 +1,26 @@
 <template>
   <div class="panel stats-panel">
-    <!-- 南丁格尔玫瑰图 -->
+    <!-- 医疗档案统计（新增） -->
     <div class="panel-title">
+      <span class="icon">◆</span> 医疗档案概览
+    </div>
+    <div class="medical-stats">
+      <div class="stat-row">
+        <span class="stat-label">有档案:</span>
+        <span class="stat-value hi-green">{{ medicalStats.totalWithProfile }}</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">过敏史:</span>
+        <span class="stat-value hi-orange">{{ medicalStats.allergyCount }}</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">病史:</span>
+        <span class="stat-value hi-blue">{{ medicalStats.historyCount }}</span>
+      </div>
+    </div>
+
+    <!-- 南丁格尔玫瑰图 -->
+    <div class="panel-title divider">
       <span class="icon">◆</span> 血型分布态势
     </div>
     <div ref="roseEl" class="chart"></div>
@@ -19,7 +38,7 @@ import { ref, watch, onMounted, onUnmounted } from 'vue'
 import * as echarts from 'echarts'
 import { useSocket } from '../composables/useSocket'
 
-const { bloodCounts, hourlyCounts } = useSocket()
+const { bloodCounts, hourlyCounts, medicalStats } = useSocket()
 const roseEl = ref(null)
 const lineEl = ref(null)
 let roseChart = null
@@ -155,4 +174,28 @@ onUnmounted(() => {
 .chart { flex: 1; min-height: 0; }
 .divider { border-top: 1px solid rgba(0, 200, 255, 0.1); }
 .icon { font-size: 0.6rem; }
+
+/* 医疗档案统计面板 */
+.medical-stats {
+  padding: 12px 16px;
+  background: rgba(0, 30, 60, 0.3);
+  border-bottom: 1px solid rgba(0, 200, 255, 0.1);
+}
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 0;
+  font-size: 0.75rem;
+}
+.stat-label {
+  color: rgba(160, 210, 255, 0.7);
+}
+.stat-value {
+  font-weight: bold;
+  font-size: 0.9rem;
+}
+.hi-green { color: #00ff88; }
+.hi-orange { color: #ffa500; }
+.hi-blue { color: #00e5ff; }
 </style>

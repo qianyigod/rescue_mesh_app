@@ -14,10 +14,19 @@ class SosRecords extends Table {
   IntColumn get id => integer().autoIncrement()();
   TextColumn get latitude => text()();
   TextColumn get longitude => text()();
-  TextColumn get status =>
-      text().withDefault(const Constant('准备广播'))();
-  DateTimeColumn get createTime =>
-      dateTime().withDefault(currentDateAndTime)();
+  TextColumn get status => text().withDefault(const Constant('准备广播'))();
+  DateTimeColumn get createTime => dateTime().withDefault(currentDateAndTime)();
+}
+
+class MedicalProfiles extends Table {
+  IntColumn get id => integer().autoIncrement()();
+  TextColumn get name => text().withDefault(const Constant(''))();
+  TextColumn get age => text().withDefault(const Constant(''))();
+  IntColumn get bloodType => integer().withDefault(const Constant(-1))();
+  TextColumn get medicalHistory => text().withDefault(const Constant(''))();
+  TextColumn get allergies => text().withDefault(const Constant(''))();
+  TextColumn get emergencyContact => text().withDefault(const Constant(''))();
+  DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
 }
 
 class SosMessages extends Table {
@@ -27,8 +36,7 @@ class SosMessages extends Table {
   RealColumn get longitude => real()();
   IntColumn get bloodType => integer()();
   DateTimeColumn get timestamp => dateTime()();
-  BoolColumn get isUploaded =>
-      boolean().withDefault(const Constant(false))();
+  BoolColumn get isUploaded => boolean().withDefault(const Constant(false))();
 }
 
 class StoredSosMessage {
@@ -51,7 +59,7 @@ class StoredSosMessage {
   final bool isUploaded;
 }
 
-@DriftDatabase(tables: [SosRecords])
+@DriftDatabase(tables: [SosRecords, MedicalProfiles])
 class AppDatabase extends _$AppDatabase {
   AppDatabase() : super(_openConnection());
   AppDatabase.forTesting(super.e);
@@ -62,7 +70,7 @@ class AppDatabase extends _$AppDatabase {
       StreamController<List<StoredSosMessage>>.broadcast();
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -73,6 +81,9 @@ class AppDatabase extends _$AppDatabase {
     onUpgrade: (Migrator m, int from, int to) async {
       if (from < 2) {
         await _createSosMessagesTable();
+      }
+      if (from < 3) {
+        await m.create(medicalProfiles);
       }
     },
     beforeOpen: (details) async {
@@ -86,6 +97,70 @@ class AppDatabase extends _$AppDatabase {
 
   Future<List<SosRecord>> getAllRecords() {
     return select(sosRecords).get();
+  }
+
+  // Medical Profile methods
+  Future<int> saveMedicalProfile({
+    required String name,
+    required String age,
+    required int bloodType,
+    required String medicalHistory,
+    required String allergies,
+    required String emergencyContact,
+  }) async {
+    final existing = await getAllMedicalProfiles();
+    if (existing.isNotEmpty) {
+      final id = existing.first.id;
+      await update(medicalProfiles).write(
+        MedicalProfilesCompanion(
+          id: Value(id),
+          name: Value(name),
+          age: Value(age),
+          bloodType: Value(bloodType),
+          medicalHistory: Value(medicalHistory),
+          allergies: Value(allergies),
+          emergencyContact: Value(emergencyContact),
+          updatedAt: Value(DateTime.now()),
+        ),
+      );
+      return id;
+    } else {
+      return into(medicalProfiles).insert(
+        MedicalProfilesCompanion.insert(
+          name: Value(name),
+          age: Value(age),
+          bloodType: Value(bloodType),
+          medicalHistory: Value(medicalHistory),
+          allergies: Value(allergies),
+          emergencyContact: Value(emergencyContact),
+        ),
+      );
+    }
+  }
+
+  Future<List<MedicalProfileData>> getAllMedicalProfiles() async {
+    final query = select(medicalProfiles);
+    query.orderBy([(t) => OrderingTerm.desc(t.updatedAt)]);
+    final rows = await query.get();
+    return rows
+        .map(
+          (row) => MedicalProfileData(
+            id: row.id,
+            name: row.name,
+            age: row.age,
+            bloodType: row.bloodType,
+            medicalHistory: row.medicalHistory,
+            allergies: row.allergies,
+            emergencyContact: row.emergencyContact,
+            updatedAt: row.updatedAt,
+          ),
+        )
+        .toList();
+  }
+
+  Future<MedicalProfileData?> getCurrentMedicalProfile() async {
+    final profiles = await getAllMedicalProfiles();
+    return profiles.isNotEmpty ? profiles.first : null;
   }
 
   Future<int> saveIncomingSos(SosMessage message) async {
@@ -151,14 +226,11 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<List<StoredSosMessage>> getAllStoredSosMessages() async {
-    final rows = await customSelect(
-      '''
+    final rows = await customSelect('''
       SELECT id, sender_mac, latitude, longitude, blood_type, timestamp, is_uploaded
       FROM $_sosMessagesTableName
       ORDER BY timestamp DESC
-      ''',
-      readsFrom: const {},
-    ).get();
+      ''', readsFrom: const {}).get();
 
     return rows.map(_mapStoredSosMessage).toList(growable: false);
   }
@@ -169,15 +241,12 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<List<StoredSosMessage>> getPendingUploads() async {
-    final rows = await customSelect(
-      '''
+    final rows = await customSelect('''
       SELECT id, sender_mac, latitude, longitude, blood_type, timestamp, is_uploaded
       FROM $_sosMessagesTableName
       WHERE is_uploaded = 0
       ORDER BY timestamp ASC
-      ''',
-      readsFrom: const {},
-    ).get();
+      ''', readsFrom: const {}).get();
 
     return rows.map(_mapStoredSosMessage).toList(growable: false);
   }
@@ -201,8 +270,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   Future<void> _createSosMessagesTable() async {
-    await customStatement(
-      '''
+    await customStatement('''
       CREATE TABLE IF NOT EXISTS $_sosMessagesTableName (
         id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
         sender_mac TEXT NOT NULL,
@@ -212,8 +280,7 @@ class AppDatabase extends _$AppDatabase {
         timestamp INTEGER NOT NULL,
         is_uploaded INTEGER NOT NULL DEFAULT 0
       )
-      ''',
-    );
+      ''');
   }
 
   StoredSosMessage _mapStoredSosMessage(QueryRow row) {
@@ -252,3 +319,26 @@ LazyDatabase _openConnection() {
 }
 
 final appDb = AppDatabase();
+
+/// Medical Profile Data class
+class MedicalProfileData {
+  const MedicalProfileData({
+    required this.id,
+    required this.name,
+    required this.age,
+    required this.bloodType,
+    required this.medicalHistory,
+    required this.allergies,
+    required this.emergencyContact,
+    required this.updatedAt,
+  });
+
+  final int id;
+  final String name;
+  final String age;
+  final int bloodType;
+  final String medicalHistory;
+  final String allergies;
+  final String emergencyContact;
+  final DateTime updatedAt;
+}

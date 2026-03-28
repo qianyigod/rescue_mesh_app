@@ -20,7 +20,15 @@ const DEDUP_WINDOW_MS = 10 * 60 * 1000;
  *       "longitude": 116.3974,
  *       "latitude":  39.9093,
  *       "bloodType": 0,
- *       "timestamp": "2024-06-15T08:30:00.000Z"
+ *       "timestamp": "2024-06-15T08:30:00.000Z",
+ *       "medicalProfile": {              // 可选：个人医疗档案
+ *         "name": "张三",
+ *         "age": "28",
+ *         "bloodTypeDetail": 3,
+ *         "medicalHistory": "无重大疾病",
+ *         "allergies": "青霉素",
+ *         "emergencyContact": "138-XXXX-1234"
+ *       }
  *     },
  *     ...
  *   ]
@@ -56,7 +64,8 @@ router.post('/sync', async (req, res) => {
   for (const raw of records) {
     try {
       const record = normalizeRecord(raw);   // 标准化并校验字段
-      const result = await upsertSosRecord(record, normalizedMuleId);
+      const medicalProfile = raw.medicalProfile || {}; // 提取医疗档案
+      const result = await upsertSosRecord(record, normalizedMuleId, medicalProfile);
 
       if (result.action === 'created') {
         created++;
@@ -145,9 +154,12 @@ function normalizeRecord(raw) {
  *   - 找到 → 追加骡子 ID（$addToSet 防止同一骡子重复记录）。
  *   - 未找到 → 新建文档。
  *
+ * @param {Object} record - 标准化的求救记录
+ * @param {String} muleId - 数据骡子 MAC 地址
+ * @param {Object} medicalProfile - 可选的个人医疗档案信息
  * @returns {{ action: 'created'|'merged', doc: mongoose.Document }}
  */
-async function upsertSosRecord(record, muleId) {
+async function upsertSosRecord(record, muleId, medicalProfile = {}) {
   const windowStart = new Date(record.timestamp.getTime() - DEDUP_WINDOW_MS);
   const windowEnd   = new Date(record.timestamp.getTime() + DEDUP_WINDOW_MS);
 
@@ -160,9 +172,18 @@ async function upsertSosRecord(record, muleId) {
     // 已存在：追加骡子 MAC，提升置信度
     await SosRecord.updateOne(
       { _id: existing._id },
-      { $addToSet: { reportedBy: muleId } }
+      { 
+        $addToSet: { reportedBy: muleId },
+        // 如果有新的医疗档案信息，也更新
+        ...(Object.keys(medicalProfile).length > 0 && {
+          $set: { medicalProfile }
+        })
+      }
     );
     existing.reportedBy = [...new Set([...existing.reportedBy, muleId])];
+    if (Object.keys(medicalProfile).length > 0) {
+      existing.medicalProfile = medicalProfile;
+    }
     return { action: 'merged', doc: existing };
   }
 
@@ -170,6 +191,7 @@ async function upsertSosRecord(record, muleId) {
   const newDoc = await SosRecord.create({
     ...record,
     reportedBy: [muleId],
+    medicalProfile: Object.keys(medicalProfile).length > 0 ? medicalProfile : undefined,
   });
   return { action: 'created', doc: newDoc };
 }

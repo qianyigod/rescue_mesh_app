@@ -1270,7 +1270,7 @@ packages:
     source: hosted
     version: "1.10.2"
   sqlite3:
-    dependency: "direct overridden"
+    dependency: "direct main"
     description:
       name: sqlite3
       sha256: "45f195ae1714b333530eaa33ce8bfcdc6187cb54156fbf907eb778fe04e8c0e9"

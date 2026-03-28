@@ -14,8 +14,12 @@ const alerts      = ref([])           // 全部告警，最新的在 index 0
 const activeCount = ref(0)
 const bloodCounts = reactive({ '-1': 0, '0': 0, '1': 0, '2': 0, '3': 0 })
 // hourlyCounts[0]=11小时前，hourlyCounts[11]=当前小时
-const hourlyCounts = ref(Array(12).fill(0))
-
+const hourlyCounts = ref(Array(12).fill(0))// 新增：医疗档案统计
+const medicalStats = reactive({
+  totalWithProfile: 0,  // 有医疗档案的人数
+  allergyCount: 0,      // 有过敏史的人数
+  historyCount: 0,      // 有病史的人数
+})
 let socket = null
 
 // ── 内部：处理一条新告警 ───────────────────────────────────
@@ -33,6 +37,14 @@ function pushAlert(sos) {
     const arr = [...hourlyCounts.value]
     arr[11 - diffH]++
     hourlyCounts.value = arr
+  }
+
+  // 更新医疗档案统计
+  if (sos.medicalProfile) {
+    const mp = sos.medicalProfile
+    if (mp.name || mp.age) medicalStats.totalWithProfile++
+    if (mp.allergies) medicalStats.allergyCount++
+    if (mp.medicalHistory) medicalStats.historyCount++
   }
 }
 
@@ -61,6 +73,15 @@ export function useSocket() {
     socket = null
   }
 
-  return { connected, alerts, activeCount, bloodCounts, hourlyCounts,
-           connect, fetchActive, disconnect }
+  return { 
+    connected, 
+    alerts, 
+    activeCount, 
+    bloodCounts, 
+    hourlyCounts,
+    medicalStats,
+    connect, 
+    fetchActive, 
+    disconnect 
+  }
 }

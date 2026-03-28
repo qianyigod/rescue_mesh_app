@@ -10,6 +10,9 @@ const mongoose = require('mongoose');
  * status      - 'active'（待救援）| 'rescued'（已救援）| 'false_alarm'（误报）
  * reportedBy  - 上报过该信号的"数据骡子"MAC 地址列表（长度即为置信度）
  * createdAt   - 服务器首次入库时间（由 timestamps 自动生成）
+ * 
+ * 个人医疗档案信息（新增）：
+ * medicalProfile - 包含姓名、年龄、病史、过敏等详细医疗信息
  */
 const sosRecordSchema = new mongoose.Schema(
   {
@@ -59,6 +62,15 @@ const sosRecordSchema = new mongoose.Schema(
     reportedBy: {
       type: [String],
       default: [],
+    },
+    // 个人医疗档案信息
+    medicalProfile: {
+      name: { type: String, default: '' },
+      age: { type: String, default: '' },
+      bloodTypeDetail: { type: Number, enum: [-1, 0, 1, 2, 3], default: -1 },
+      medicalHistory: { type: String, default: '' },
+      allergies: { type: String, default: '' },
+      emergencyContact: { type: String, default: '' },
     },
   },
   {

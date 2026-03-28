@@ -28,8 +28,7 @@ class NetworkSyncService extends ChangeNotifier {
        _httpClient = httpClient ?? http.Client(),
        _ownsHttpClient = httpClient == null,
        _endpoint =
-           endpoint ??
-           Uri.parse('https://api.rescuemesh.com/v1/sos/sync'),
+           endpoint ?? Uri.parse('https://api.rescuemesh.com/v1/sos/sync'),
        _requestTimeout = requestTimeout ?? const Duration(seconds: 12),
        _connectivityStreamProvider = connectivityStreamProvider,
        _connectivitySnapshotProvider = connectivitySnapshotProvider;
@@ -118,13 +117,26 @@ class NetworkSyncService extends ChangeNotifier {
         return 0;
       }
 
+      // 获取个人医疗档案
+      final medicalProfile = await _getMedicalProfileJson('');
+
+      // 构建上传数据，包含医疗档案信息
+      final uploadData = pendingMessages
+          .map((message) {
+            final data = _mapMessageToJson(message);
+            // 如果是第一条消息或者是本机发送的，附加医疗档案
+            if (message.id == pendingMessages.first.id) {
+              data['medicalProfile'] = medicalProfile;
+            }
+            return data;
+          })
+          .toList(growable: false);
+
       final response = await _httpClient
           .post(
             _endpoint,
             headers: const {'Content-Type': 'application/json'},
-            body: jsonEncode(
-              pendingMessages.map(_mapMessageToJson).toList(growable: false),
-            ),
+            body: jsonEncode(uploadData),
           )
           .timeout(_requestTimeout);
 
@@ -214,6 +226,28 @@ class NetworkSyncService extends ChangeNotifier {
       'bloodType': message.bloodType,
       'timestamp': message.timestamp.toUtc().toIso8601String(),
     };
+  }
+
+  /// 从数据库获取个人医疗档案并转换为 JSON
+  Future<Map<String, Object?>> _getMedicalProfileJson(String senderMac) async {
+    try {
+      // 尝试从数据库获取医疗档案
+      final profile = await _database.getCurrentMedicalProfile();
+      if (profile != null) {
+        return <String, Object?>{
+          'name': profile.name,
+          'age': profile.age,
+          'bloodTypeDetail': profile.bloodType,
+          'medicalHistory': profile.medicalHistory,
+          'allergies': profile.allergies,
+          'emergencyContact': profile.emergencyContact,
+        };
+      }
+    } catch (e) {
+      debugPrint('获取医疗档案失败：$e');
+    }
+    // 返回空对象
+    return <String, Object?>{};
   }
 
   void _setException(NetworkSyncException? exception) {

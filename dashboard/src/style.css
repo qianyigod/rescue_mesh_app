@@ -115,3 +115,7 @@ html, body, #app { width: 100%; height: 100%; overflow: hidden; }
 }
 .sos-popup .p-row .hi { color: #00e5ff; font-weight: bold; }
 .sos-popup .p-row .hi-red { color: #ff8080; font-weight: bold; }
+.sos-popup .p-row .hi-green { color: #00ff88; font-weight: bold; }
+.sos-popup .p-row .hi-orange { color: #ffa500; font-weight: bold; }
+.sos-popup .p-row .hi-purple { color: #dda0dd; font-weight: bold; }
+.sos-popup .p-row .warn { color: #ffa500; font-weight: bold; }

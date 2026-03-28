@@ -36,13 +36,22 @@ function mkIcon() {
 }
 
 function mkPopup(sos) {
-  const bt   = BLOOD_LABELS[sos.bloodType] ?? '未知'
+  const bt   = sos.medicalProfile?.bloodTypeDetail !== undefined 
+    ? BLOOD_LABELS[sos.medicalProfile.bloodTypeDetail] ?? '未知'
+    : BLOOD_LABELS[sos.bloodType] ?? '未知'
   const time = new Date(sos.timestamp).toLocaleString('zh-CN')
   const relay = sos.reportedBy?.length ?? 1
+  const mp = sos.medicalProfile || {}
+  
   return `<div class="sos-popup">
     <div class="p-title">⚠ SOS 求救信号</div>
     <div class="p-row"><span>设备 MAC</span><span>${sos.senderMac}</span></div>
+    ${mp.name ? `<div class="p-row"><span>姓名</span><span class="hi-green">${mp.name}</span></div>` : ''}
+    ${mp.age ? `<div class="p-row"><span>年龄</span><span>${mp.age}</span></div>` : ''}
     <div class="p-row"><span>血型</span><span class="hi-red">${bt}</span></div>
+    ${mp.allergies ? `<div class="p-row"><span class="warn">⚠ 过敏</span><span class="hi-orange">${mp.allergies}</span></div>` : ''}
+    ${mp.medicalHistory ? `<div class="p-row"><span>病史</span><span>${mp.medicalHistory}</span></div>` : ''}
+    ${mp.emergencyContact ? `<div class="p-row"><span>联系人</span><span class="hi-purple">${mp.emergencyContact}</span></div>` : ''}
     <div class="p-row"><span>求救时间</span><span>${time}</span></div>
     <div class="p-row"><span>中继次数</span><span class="hi">${relay} 次</span></div>
     <div class="p-row"><span>置信度</span><span class="hi">${sos.confidence ?? relay}</span></div>

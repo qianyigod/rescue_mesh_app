@@ -2,15 +2,20 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:location/location.dart';
 
+import 'ar_rescue_compass_page.dart';
 import 'models/emergency_profile.dart';
+import 'models/mesh_state_provider.dart';
 import 'models/sos_message.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
 import 'services/power_saving_manager.dart';
 import 'theme/rescue_theme.dart';
+import 'widgets/offline_tactical_map_view.dart';
+import 'widgets/sonar_radar_widget.dart';
 
 class MeshDashboardPage extends StatefulWidget {
   MeshDashboardPage({
@@ -35,6 +40,9 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
 
   String? _actionStatus;
   Stream<SosMessage>? _sosStream;
+
+  // [新增] 视图模式切换：false = 雷达模式，true = 地图模式
+  bool _isMapView = false;
 
   @override
   void initState() {
@@ -169,6 +177,19 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
     }
   }
 
+  void _openArRescueCompass() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ArRescueCompassPage(
+          targetLatitude: 0.0,
+          targetLongitude: 0.0,
+          targetName: 'AR 导航',
+        ),
+      ),
+    );
+  }
+
   void _showError(String message) {
     if (!mounted) {
       return;
@@ -177,10 +198,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
       _actionStatus = message;
     });
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        backgroundColor: RescuePalette.critical,
-        content: Text(message),
-      ),
+      SnackBar(backgroundColor: RescuePalette.critical, content: Text(message)),
     );
   }
 
@@ -222,11 +240,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
             gradient: LinearGradient(
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
-              colors: [
-                Color(0xFFF7FAFC),
-                Color(0xFFF0F5F7),
-                Color(0xFFE7EEF2),
-              ],
+              colors: [Color(0xFFF7FAFC), Color(0xFFF0F5F7), Color(0xFFE7EEF2)],
             ),
           ),
           child: SafeArea(
@@ -265,10 +279,11 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                           const SizedBox(width: 10),
                           Text(
                             '救援系统现场终端',
-                            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 0.8,
-                            ),
+                            style: Theme.of(context).textTheme.titleLarge
+                                ?.copyWith(
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.8,
+                                ),
                           ),
                         ],
                       ),
@@ -339,23 +354,62 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(
-                            '雷达监测区',
-                            style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 0.8,
-                            ),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  '雷达监测区',
+                                  style: Theme.of(context).textTheme.titleMedium
+                                      ?.copyWith(
+                                        fontWeight: FontWeight.w900,
+                                        letterSpacing: 0.8,
+                                      ),
+                                ),
+                              ),
+                              // [新增] 视图切换按钮
+                              IconButton(
+                                icon: Icon(
+                                  _isMapView ? Icons.radar : Icons.map,
+                                  color: _isMapView
+                                      ? RescuePalette.accent
+                                      : RescuePalette.success,
+                                ),
+                                tooltip: _isMapView ? '切换到雷达模式' : '切换到地图模式',
+                                onPressed: () {
+                                  setState(() {
+                                    _isMapView = !_isMapView;
+                                  });
+                                },
+                              ),
+                            ],
                           ),
                           const SizedBox(height: 14),
-                          if (!snapshot.hasData)
-                            _RadarSilentPanel(
-                              controller: _radarController,
-                              isScanning: widget.scannerService.isScanning,
+                          if (_isMapView)
+                            // [新增] 地图模式
+                            SizedBox(
+                              height: 280,
+                              child: OfflineTacticalMapView(),
                             )
                           else
-                            _SosAlertCard(
-                              message: snapshot.data!,
-                              distanceText: _formatDistance(snapshot.data!.rssi),
+                            // [原有] 雷达模式
+                            StreamBuilder<SosMessage>(
+                              stream: _sosStream,
+                              builder: (context, snapshot) {
+                                if (!snapshot.hasData) {
+                                  return _RadarSilentPanel(
+                                    controller: _radarController,
+                                    isScanning:
+                                        widget.scannerService.isScanning,
+                                  );
+                                } else {
+                                  return _SosAlertCard(
+                                    message: snapshot.data!,
+                                    distanceText: _formatDistance(
+                                      snapshot.data!.rssi,
+                                    ),
+                                  );
+                                }
+                              },
                             ),
                         ],
                       ),
@@ -424,6 +478,24 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                     ),
                   ],
                 ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: _ActionButton(
+                        controller: _pulseController,
+                        icon: Icons.explore,
+                        title: 'AR 救援罗盘',
+                        subtitle: '使用 AR 技术导航至求救者位置',
+                        active: false,
+                        activeColor: RescuePalette.accent,
+                        idleBackground: RescuePalette.accentSoft,
+                        iconColor: RescuePalette.accent,
+                        onTap: _openArRescueCompass,
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ),
           ),
@@ -476,10 +548,7 @@ class _StatusPill extends StatelessWidget {
 }
 
 class _RadarSilentPanel extends StatelessWidget {
-  const _RadarSilentPanel({
-    required this.controller,
-    required this.isScanning,
-  });
+  const _RadarSilentPanel({required this.controller, required this.isScanning});
 
   final AnimationController controller;
   final bool isScanning;
@@ -508,7 +577,9 @@ class _RadarSilentPanel extends StatelessWidget {
                           decoration: BoxDecoration(
                             shape: BoxShape.circle,
                             border: Border.all(
-                              color: RescuePalette.success.withValues(alpha: 0.32),
+                              color: RescuePalette.success.withValues(
+                                alpha: 0.32,
+                              ),
                             ),
                           ),
                         ),
@@ -558,17 +629,13 @@ class _RadarSilentPanel extends StatelessWidget {
         Text(
           isScanning ? '雷达静默，周边安全' : '雷达待机，点击下方按钮开始扫描',
           style: Theme.of(context).textTheme.titleMedium?.copyWith(
-            color: isScanning
-                ? RescuePalette.success
-                : RescuePalette.textMuted,
+            color: isScanning ? RescuePalette.success : RescuePalette.textMuted,
             fontWeight: FontWeight.w900,
           ),
         ),
         const SizedBox(height: 8),
         Text(
-          isScanning
-              ? '正在扫描周边区域，等待求救信号...'
-              : '扫描启动后，这里会实时显示附近的求救卡片',
+          isScanning ? '正在扫描周边区域，等待求救信号...' : '扫描启动后，这里会实时显示附近的求救卡片',
           textAlign: TextAlign.center,
           style: Theme.of(context).textTheme.bodyMedium?.copyWith(
             color: RescuePalette.textMuted,
@@ -581,10 +648,7 @@ class _RadarSilentPanel extends StatelessWidget {
 }
 
 class _SosAlertCard extends StatelessWidget {
-  const _SosAlertCard({
-    required this.message,
-    required this.distanceText,
-  });
+  const _SosAlertCard({required this.message, required this.distanceText});
 
   final SosMessage message;
   final String distanceText;
@@ -597,11 +661,7 @@ class _SosAlertCard extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [
-            Color(0xFFFCE9EA),
-            Color(0xFFF7D7D9),
-            Color(0xFFF2C6CA),
-          ],
+          colors: [Color(0xFFFCE9EA), Color(0xFFF7D7D9), Color(0xFFF2C6CA)],
         ),
         borderRadius: BorderRadius.circular(24),
         border: Border.all(color: RescuePalette.critical),
@@ -646,16 +706,16 @@ class _SosAlertCard extends StatelessWidget {
           const SizedBox(height: 14),
           Text(
             '设备 ID：${message.remoteId}',
-            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-              color: RescuePalette.textPrimary,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: RescuePalette.textPrimary),
           ),
           const SizedBox(height: 6),
           Text(
             '接收时间：${message.receivedAt.toLocal()}',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: RescuePalette.textMuted,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: RescuePalette.textMuted),
           ),
         ],
       ),
@@ -664,10 +724,7 @@ class _SosAlertCard extends StatelessWidget {
 }
 
 class _AlertMetric extends StatelessWidget {
-  const _AlertMetric({
-    required this.label,
-    required this.value,
-  });
+  const _AlertMetric({required this.label, required this.value});
 
   final String label;
   final String value;
@@ -687,9 +744,9 @@ class _AlertMetric extends StatelessWidget {
         children: [
           Text(
             label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: RescuePalette.textMuted,
-            ),
+            style: Theme.of(
+              context,
+            ).textTheme.bodySmall?.copyWith(color: RescuePalette.textMuted),
           ),
           const SizedBox(height: 4),
           Text(

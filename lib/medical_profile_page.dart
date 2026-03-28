@@ -1,17 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
+import 'database.dart';
 import 'models/emergency_profile.dart';
 import 'theme/rescue_theme.dart';
 
-// ── SharedPreferences keys ───────────────────────────────────
-const _kName = 'med_name';
-const _kAge = 'med_age';
-const _kBlood = 'med_blood';
-const _kHistory = 'med_history';
-const _kAllergy = 'med_allergy';
-const _kContact = 'med_contact';
+// ── Database-backed storage ───────────────────────────────────
+// Using Drift database instead of SharedPreferences
 
 class MedicalProfilePage extends StatefulWidget {
   const MedicalProfilePage({super.key});
@@ -33,7 +28,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
   @override
   void initState() {
     super.initState();
-    _loadPrefs();
+    _loadFromDatabase();
   }
 
   @override
@@ -46,35 +41,51 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
     super.dispose();
   }
 
-  Future<void> _loadPrefs() async {
-    final p = await SharedPreferences.getInstance();
-    if (!mounted) return;
-    setState(() {
-      _nameCtrl.text = p.getString(_kName) ?? '';
-      _ageCtrl.text = p.getString(_kAge) ?? '';
-      _historyCtrl.text = p.getString(_kHistory) ?? '';
-      _allergyCtrl.text = p.getString(_kAllergy) ?? '';
-      _contactCtrl.text = p.getString(_kContact) ?? '';
-      final code = p.getInt(_kBlood) ?? -1;
-      _blood = BloodType.values.firstWhere(
-        (t) => t.code == code,
-        orElse: () => BloodType.unknown,
-      );
-    });
+  Future<void> _loadFromDatabase() async {
+    try {
+      final profile = await appDb.getCurrentMedicalProfile();
+      if (!mounted) return;
+      setState(() {
+        _nameCtrl.text = profile?.name ?? '';
+        _ageCtrl.text = profile?.age ?? '';
+        _historyCtrl.text = profile?.medicalHistory ?? '';
+        _allergyCtrl.text = profile?.allergies ?? '';
+        _contactCtrl.text = profile?.emergencyContact ?? '';
+        final code = profile?.bloodType ?? -1;
+        _blood = BloodType.values.firstWhere(
+          (t) => t.code == code,
+          orElse: () => BloodType.unknown,
+        );
+      });
+    } catch (e) {
+      debugPrint('Error loading medical profile: $e');
+      if (!mounted) return;
+      setState(() {
+        // Use default empty values
+        _nameCtrl.text = '';
+        _ageCtrl.text = '';
+        _historyCtrl.text = '';
+        _allergyCtrl.text = '';
+        _contactCtrl.text = '';
+        _blood = BloodType.unknown;
+      });
+    }
   }
 
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      final p = await SharedPreferences.getInstance();
-      await p.setString(_kName, _nameCtrl.text.trim());
-      await p.setString(_kAge, _ageCtrl.text.trim());
-      await p.setInt(_kBlood, _blood.code);
-      await p.setString(_kHistory, _historyCtrl.text.trim());
-      await p.setString(_kAllergy, _allergyCtrl.text.trim());
-      await p.setString(_kContact, _contactCtrl.text.trim());
+      // Save to database
+      await appDb.saveMedicalProfile(
+        name: _nameCtrl.text.trim(),
+        age: _ageCtrl.text.trim(),
+        bloodType: _blood.code,
+        medicalHistory: _historyCtrl.text.trim(),
+        allergies: _allergyCtrl.text.trim(),
+        emergencyContact: _contactCtrl.text.trim(),
+      );
 
-      // 同步更新 EmergencyProfile
+      // Sync to EmergencyProfile
       EmergencyProfile.updateProfile(
         callsign: _nameCtrl.text.trim().isEmpty ? _nameCtrl.text.trim() : null,
         bloodType: _blood,
@@ -90,9 +101,37 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
               Icon(Icons.check_circle, color: RescuePalette.success, size: 20),
               SizedBox(width: 10),
               Text(
-                '✅ 档案已安全保存在本地',
+                '✅ 档案已安全保存到数据库',
                 style: TextStyle(
                   color: RescuePalette.success,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          backgroundColor: Colors.white,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
+          elevation: 4,
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      debugPrint('Error saving medical profile: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Row(
+            children: [
+              Icon(Icons.error, color: RescuePalette.critical, size: 20),
+              SizedBox(width: 10),
+              Text(
+                '❌ 保存失败，请重试',
+                style: TextStyle(
+                  color: RescuePalette.critical,
                   fontWeight: FontWeight.w700,
                 ),
               ),
