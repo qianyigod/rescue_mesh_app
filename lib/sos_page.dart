@@ -1,12 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:location/location.dart';
-
-import 'database.dart';
 import 'models/emergency_profile.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
-import 'services/network_sync_service.dart';
-import 'services/power_saving_manager.dart';
+import 'services/sos_trigger_service.dart';
 import 'theme/rescue_theme.dart';
 
 class SosPage extends StatefulWidget {
@@ -27,127 +23,62 @@ class _SosPageState extends State<SosPage> {
 
     setState(() {
       _isLocating = true;
-      _statusText = '正在获取定位并打包 SOS 信标数据...';
+      _statusText = '??????????? SOS...';
     });
 
     try {
-      final location = Location();
-
-      var serviceEnabled = await location.serviceEnabled();
-      if (!serviceEnabled) {
-        serviceEnabled = await location.requestService();
-        if (!serviceEnabled) {
-          throw const BleMeshPlatformException(
-            platformCode: 'location_service_disabled',
-            message: '定位服务未开启，无法附加坐标信息。',
-          );
-        }
-      }
-
-      var permissionGranted = await location.hasPermission();
-      if (permissionGranted == PermissionStatus.denied) {
-        permissionGranted = await location.requestPermission();
-      }
-      if (permissionGranted != PermissionStatus.granted) {
-        throw const BleMeshPlatformException(
-          platformCode: 'location_permission_denied',
-          message: '定位权限未授予，无法广播当前位置。',
-        );
-      }
-
-      setState(() {
-        _statusText = '正在写入本地 Drift 记录，并启动 SOS 广播...';
-      });
-
-      final locationData = await powerSavingManager.acquireLocationFix(
-        location: location,
-      );
-      final latitude = locationData.latitude;
-      final longitude = locationData.longitude;
-      if (latitude == null || longitude == null) {
-        throw const BleMeshPlatformException(
-          platformCode: 'location_unavailable',
-          message: '定位坐标不可用，请稍后重试。',
-        );
-      }
-
-      // Save to sos_messages table for immediate upload
-      await appDb.addSosMessage(
-        senderMac: 'SELF', // Mark as self-generated
-        latitude: latitude,
-        longitude: longitude,
-        bloodType: EmergencyProfile.current.bloodType.code,
-      );
-
-      await bleMeshService.startSosBroadcast(
-        latitude: latitude,
-        longitude: longitude,
+      final result = await sosTriggerService.triggerSos(
+        bleService: bleMeshService,
         bloodType: EmergencyProfile.current.bloodType,
       );
-      // Immediately upload to server if network is available
+
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _statusText = 'SOS 已进入广播态，正在尝试联网上传至指挥中心...';
-      });
-
-      // Trigger immediate sync
-      try {
-        final uploadedCount = await networkSyncService.syncNow();
-        if (!mounted) {
-          return;
-        }
-
-        if (uploadedCount > 0) {
-          setState(() {
-            _statusText =
-                '✓ SOS 已广播并成功上传至指挥中心！\n'
-                '纬度：$latitude\n'
-                '经度：$longitude\n'
-                '已上传 $uploadedCount 条记录到大屏。';
-          });
-        } else {
-          setState(() {
-            _statusText =
-                'SOS 已广播并存储，但无新记录可上传。\n'
-                '纬度：$latitude\n'
-                '经度：$longitude';
-          });
-        }
-      } catch (error) {
-        if (!mounted) {
-          return;
-        }
-        // Sync failed but SOS is still broadcasting locally
-        setState(() {
+        if (result.uploadedToCommandCenter && result.broadcastStarted) {
+          _statusText = '''
+SOS ??????????????
+??: ${result.latitude.toStringAsFixed(5)}
+??: ${result.longitude.toStringAsFixed(5)}
+??? ${result.uploadedCount} ????
+'''.trim();
+        } else if (result.uploadedToCommandCenter && result.bleError != null) {
           _statusText =
-              'SOS 已广播并存储，但联网上传失败：$error\n'
-              '数据将保留并在下次联网时自动上传。';
-        });
-      }
-      if (!mounted) {
-        return;
-      }
-
-      setState(() {
-        _statusText =
-            'SOS 已进入广播态。\n纬度: $latitude\n经度: $longitude\nManufacturer Data 正在通过 BLE 持续发射。';
+              'SOS ???????????? BLE ?????${result.bleError}';
+        } else if (result.syncError != null && result.broadcastStarted) {
+          _statusText = '''
+SOS ????????????${result.syncError}
+?????????????????
+'''.trim();
+        } else if (result.syncError != null && result.bleError != null) {
+          _statusText = '''
+SOS ???????? BLE ????????????
+BLE?${result.bleError}
+???${result.syncError}
+'''.trim();
+        } else {
+          _statusText = '''
+SOS ????
+??: ${result.latitude.toStringAsFixed(5)}
+??: ${result.longitude.toStringAsFixed(5)}
+'''.trim();
+        }
       });
     } on BleMeshException catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
-        _statusText = 'SOS 广播失败: ${error.message}';
+        _statusText = 'SOS ????: ${error.message}';
       });
     } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
-        _statusText = '出现未预期错误: $error';
+        _statusText = '???????: $error';
       });
     } finally {
       if (mounted) {

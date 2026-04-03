@@ -1,8 +1,8 @@
 import { ref, reactive } from 'vue'
 import { io } from 'socket.io-client'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000'
-const API_BASE   = import.meta.env.VITE_API_BASE   || 'http://localhost:3000'
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://101.35.52.133:3000'
+const API_BASE   = import.meta.env.VITE_API_BASE   || 'http://101.35.52.133:3000'
 
 // ── 血型映射 ────────────────────────────────────────────────
 export const BLOOD_LABELS = { '-1': '未知', 0: 'A型', 1: 'B型', 2: 'AB型', 3: 'O型' }

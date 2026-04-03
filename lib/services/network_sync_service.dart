@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../database.dart';
 import 'network_sync_exceptions.dart';
@@ -15,12 +17,15 @@ typedef ConnectivityStatusSnapshotProvider =
     Future<List<ConnectivityResult>> Function();
 
 class NetworkSyncService extends ChangeNotifier {
+  static const String _deviceIdPreferenceKey = 'network_sync_device_id';
+
   NetworkSyncService({
     AppDatabase? database,
     Connectivity? connectivity,
     http.Client? httpClient,
     Uri? endpoint,
     Duration? requestTimeout,
+    String? muleId,
     ConnectivityStatusStreamProvider? connectivityStreamProvider,
     ConnectivityStatusSnapshotProvider? connectivitySnapshotProvider,
   }) : _database = database ?? appDb,
@@ -28,8 +33,9 @@ class NetworkSyncService extends ChangeNotifier {
        _httpClient = httpClient ?? http.Client(),
        _ownsHttpClient = httpClient == null,
        _endpoint =
-           endpoint ?? Uri.parse('http://192.168.101.20:3000/api/sos/sync'),
+           endpoint ?? Uri.parse('http://101.35.52.133:3000/api/sos/sync'),
        _requestTimeout = requestTimeout ?? const Duration(seconds: 12),
+       _muleId = muleId,
        _connectivityStreamProvider = connectivityStreamProvider,
        _connectivitySnapshotProvider = connectivitySnapshotProvider;
 
@@ -39,6 +45,7 @@ class NetworkSyncService extends ChangeNotifier {
   final bool _ownsHttpClient;
   final Uri _endpoint;
   final Duration _requestTimeout;
+  final String? _muleId;
   final ConnectivityStatusStreamProvider? _connectivityStreamProvider;
   final ConnectivityStatusSnapshotProvider? _connectivitySnapshotProvider;
 
@@ -76,7 +83,8 @@ class NetworkSyncService extends ChangeNotifier {
           _setException(
             NetworkSyncUnexpectedException(
               details: error,
-              message: '网络状态监听失败，自动同步已停止等待下一次重启。',
+              message:
+                  'Network state listener failed. Automatic sync is paused until restart.',
             ),
           );
         },
@@ -89,7 +97,7 @@ class NetworkSyncService extends ChangeNotifier {
       _isListening = false;
       final exception = NetworkSyncUnexpectedException(
         details: error,
-        message: '初始化网络同步监听失败。',
+        message: 'Failed to initialize network sync listener.',
       );
       _setException(exception);
       rethrow;
@@ -98,11 +106,17 @@ class NetworkSyncService extends ChangeNotifier {
 
   Future<int> syncNow() async {
     if (_isSyncing) {
+      debugPrint('[NetworkSync] Sync already running, skipping duplicate call.');
       return 0;
     }
 
-    if (!_hasNetwork) {
-      final exception = const NetworkSyncOfflineException();
+    final currentStatuses = await _getConnectivitySnapshot();
+    final currentHasNetwork = _hasUsableNetwork(currentStatuses);
+    _hasNetwork = currentHasNetwork;
+
+    if (!currentHasNetwork) {
+      debugPrint('[NetworkSync] No usable network connection, aborting sync.');
+      const exception = NetworkSyncOfflineException();
       _setException(exception);
       throw exception;
     }
@@ -112,39 +126,54 @@ class NetworkSyncService extends ChangeNotifier {
     notifyListeners();
 
     try {
+      final deviceId = await _getOrCreateDeviceId();
       final pendingMessages = await _database.getPendingUploads();
+      debugPrint(
+        '[NetworkSync] Pending SOS messages: ${pendingMessages.length}',
+      );
+
       if (pendingMessages.isEmpty) {
+        debugPrint('[NetworkSync] Nothing to upload.');
         return 0;
       }
 
-      // 获取个人医疗档案
-      final medicalProfile = await _getMedicalProfileJson('');
+      final medicalProfile = await _getMedicalProfileJson();
+      final firstMessageId = pendingMessages.first.id;
+      final uploadData = pendingMessages.map((message) {
+        final data = _mapMessageToJson(message, deviceId);
+        if (message.id == firstMessageId && medicalProfile.isNotEmpty) {
+          data['medicalProfile'] = medicalProfile;
+        }
+        return data;
+      }).toList(growable: false);
 
-      // 构建上传数据，包含医疗档案信息
-      final uploadData = pendingMessages
-          .map((message) {
-            final data = _mapMessageToJson(message);
-            // 如果是第一条消息或者是本机发送的，附加医疗档案
-            if (message.id == pendingMessages.first.id) {
-              data['medicalProfile'] = medicalProfile;
-            }
-            return data;
-          })
-          .toList(growable: false);
+      final requestBody = <String, Object?>{
+        'muleId': _muleId ?? deviceId,
+        'records': uploadData,
+      };
+
+      debugPrint('[NetworkSync] POST $_endpoint');
+      debugPrint('[NetworkSync] Body: ${jsonEncode(requestBody)}');
 
       final response = await _httpClient
           .post(
             _endpoint,
             headers: const {'Content-Type': 'application/json'},
-            body: jsonEncode(uploadData),
+            body: jsonEncode(requestBody),
           )
           .timeout(_requestTimeout);
+
+      debugPrint('[NetworkSync] Response status: ${response.statusCode}');
+      debugPrint('[NetworkSync] Response body: ${response.body}');
 
       if (response.statusCode == 200) {
         await _database.markAsUploaded(
           pendingMessages.map((message) => message.id).toList(growable: false),
         );
         _lastSuccessfulSyncAt = DateTime.now();
+        debugPrint(
+          '[NetworkSync] Uploaded ${pendingMessages.length} SOS message(s).',
+        );
         return pendingMessages.length;
       }
 
@@ -155,17 +184,21 @@ class NetworkSyncService extends ChangeNotifier {
       _setException(exception);
       return 0;
     } on TimeoutException {
-      final exception = const NetworkSyncTimeoutException();
+      debugPrint('[NetworkSync] Request timed out.');
+      const exception = NetworkSyncTimeoutException();
       _setException(exception);
       return 0;
     } on SocketException catch (error) {
+      debugPrint('[NetworkSync] Socket error: $error');
       final exception = NetworkSyncUnexpectedException(
         details: error,
-        message: '连接指挥中心失败，本地求救数据将保留并等待下次联网。',
+        message:
+            'Failed to reach the command server. SOS data will stay local and retry later.',
       );
       _setException(exception);
       return 0;
     } catch (error) {
+      debugPrint('[NetworkSync] Unexpected error: $error');
       if (error is NetworkSyncException) {
         _setException(error);
         return 0;
@@ -190,6 +223,9 @@ class NetworkSyncService extends ChangeNotifier {
   void _handleConnectivityChanged(List<ConnectivityResult> statuses) {
     final hasNetwork = _hasUsableNetwork(statuses);
     final shouldTriggerSync = !_hasNetwork && hasNetwork;
+    debugPrint(
+      '[NetworkSync] Connectivity changed: $_hasNetwork -> $hasNetwork, trigger sync: $shouldTriggerSync',
+    );
     _hasNetwork = hasNetwork;
     notifyListeners();
 
@@ -217,10 +253,13 @@ class NetworkSyncService extends ChangeNotifier {
     return false;
   }
 
-  Map<String, Object?> _mapMessageToJson(StoredSosMessage message) {
+  Map<String, Object?> _mapMessageToJson(
+    StoredSosMessage message,
+    String deviceId,
+  ) {
     return <String, Object?>{
       'id': message.id,
-      'senderMac': message.senderMac,
+      'senderMac': _normalizeSenderMac(message.senderMac, deviceId),
       'latitude': message.latitude,
       'longitude': message.longitude,
       'bloodType': message.bloodType,
@@ -228,26 +267,51 @@ class NetworkSyncService extends ChangeNotifier {
     };
   }
 
-  /// 从数据库获取个人医疗档案并转换为 JSON
-  Future<Map<String, Object?>> _getMedicalProfileJson(String senderMac) async {
-    try {
-      // 尝试从数据库获取医疗档案
-      final profile = await _database.getCurrentMedicalProfile();
-      if (profile != null) {
-        return <String, Object?>{
-          'name': profile.name,
-          'age': profile.age,
-          'bloodTypeDetail': profile.bloodType,
-          'medicalHistory': profile.medicalHistory,
-          'allergies': profile.allergies,
-          'emergencyContact': profile.emergencyContact,
-        };
-      }
-    } catch (e) {
-      debugPrint('获取医疗档案失败：$e');
+  String _normalizeSenderMac(String senderMac, String deviceId) {
+    final normalized = senderMac.trim().toUpperCase();
+    if (normalized.isEmpty || normalized == 'SELF') {
+      return deviceId;
     }
-    // 返回空对象
-    return <String, Object?>{};
+    return normalized;
+  }
+
+  Future<Map<String, Object?>> _getMedicalProfileJson() async {
+    try {
+      final profile = await _database.getCurrentMedicalProfile();
+      if (profile == null) {
+        return <String, Object?>{};
+      }
+
+      return <String, Object?>{
+        'name': profile.name,
+        'age': profile.age,
+        'bloodTypeDetail': profile.bloodType,
+        'medicalHistory': profile.medicalHistory,
+        'allergies': profile.allergies,
+        'emergencyContact': profile.emergencyContact,
+      };
+    } catch (error) {
+      debugPrint('[NetworkSync] Failed to load medical profile: $error');
+      return <String, Object?>{};
+    }
+  }
+
+  Future<String> _getOrCreateDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    final existingId = prefs.getString(_deviceIdPreferenceKey);
+    if (existingId != null && existingId.isNotEmpty) {
+      return existingId;
+    }
+
+    final random = Random();
+    final suffix = List.generate(
+      12,
+      (_) => random.nextInt(16).toRadixString(16),
+    ).join().toUpperCase();
+    final deviceId =
+        'PHONE-${DateTime.now().millisecondsSinceEpoch.toRadixString(16).toUpperCase()}-$suffix';
+    await prefs.setString(_deviceIdPreferenceKey, deviceId);
+    return deviceId;
   }
 
   void _setException(NetworkSyncException? exception) {

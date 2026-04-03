@@ -2,20 +2,16 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:location/location.dart';
 
 import 'ar_rescue_compass_page.dart';
 import 'models/emergency_profile.dart';
-import 'models/mesh_state_provider.dart';
 import 'models/sos_message.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
-import 'services/power_saving_manager.dart';
+import 'services/sos_trigger_service.dart';
 import 'theme/rescue_theme.dart';
 import 'widgets/offline_tactical_map_view.dart';
-import 'widgets/sonar_radar_widget.dart';
 
 class MeshDashboardPage extends StatefulWidget {
   MeshDashboardPage({
@@ -93,44 +89,8 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
         _actionStatus = '正在获取定位并准备发起 SOS 广播...';
       });
 
-      final location = Location();
-      var serviceEnabled = await location.serviceEnabled();
-      if (!serviceEnabled) {
-        serviceEnabled = await location.requestService();
-        if (!serviceEnabled) {
-          throw const BleMeshPlatformException(
-            platformCode: 'location_service_disabled',
-            message: '定位服务未开启，无法广播当前位置。',
-          );
-        }
-      }
-
-      var permissionGranted = await location.hasPermission();
-      if (permissionGranted == PermissionStatus.denied) {
-        permissionGranted = await location.requestPermission();
-      }
-      if (permissionGranted != PermissionStatus.granted) {
-        throw const BleMeshPlatformException(
-          platformCode: 'location_permission_denied',
-          message: '定位权限未授予，无法发起带坐标的 SOS 广播。',
-        );
-      }
-
-      final locationData = await powerSavingManager.acquireLocationFix(
-        location: location,
-      );
-      final latitude = locationData.latitude;
-      final longitude = locationData.longitude;
-      if (latitude == null || longitude == null) {
-        throw const BleMeshPlatformException(
-          platformCode: 'location_unavailable',
-          message: '当前定位结果不可用，请稍后再试。',
-        );
-      }
-
-      await widget.sosService.startSosBroadcast(
-        latitude: latitude,
-        longitude: longitude,
+      final result = await sosTriggerService.triggerSos(
+        bleService: widget.sosService,
         bloodType: EmergencyProfile.current.bloodType,
       );
 
@@ -138,8 +98,22 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
         return;
       }
       setState(() {
-        _actionStatus =
-            'SOS 广播已发出。纬度 ${latitude.toStringAsFixed(5)}，经度 ${longitude.toStringAsFixed(5)}。';
+        if (result.uploadedToCommandCenter && result.broadcastStarted) {
+          _actionStatus =
+              'SOS 已广播并成功上传到指挥中心。纬度 ${result.latitude.toStringAsFixed(5)}，经度 ${result.longitude.toStringAsFixed(5)}。';
+        } else if (result.uploadedToCommandCenter && result.bleError != null) {
+          _actionStatus =
+              'SOS 已上传到指挥中心，但本地 BLE 广播失败：${result.bleError}';
+        } else if (result.syncError != null && result.broadcastStarted) {
+          _actionStatus =
+              'SOS 已广播，但联网上传失败：${result.syncError}。数据已保存，恢复联网后会自动重试。';
+        } else if (result.syncError != null && result.bleError != null) {
+          _actionStatus =
+              'SOS 已保存到本地，但 BLE 广播和联网上传都失败了。BLE：${result.bleError}；网络：${result.syncError}';
+        } else {
+          _actionStatus =
+              'SOS 已保存。纬度 ${result.latitude.toStringAsFixed(5)}，经度 ${result.longitude.toStringAsFixed(5)}。';
+        }
       });
     } on BleMeshException catch (error) {
       _showError(error.message);
@@ -181,7 +155,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => ArRescueCompassPage(
+        builder: (context) => const ArRescueCompassPage(
           targetLatitude: 0.0,
           targetLongitude: 0.0,
           targetName: 'AR 导航',
@@ -386,7 +360,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                           const SizedBox(height: 14),
                           if (_isMapView)
                             // [新增] 地图模式
-                            SizedBox(
+                            const SizedBox(
                               height: 280,
                               child: OfflineTacticalMapView(),
                             )
