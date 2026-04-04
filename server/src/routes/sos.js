@@ -1,199 +1,204 @@
 const express = require('express');
-const router = express.Router();
+const mongoose = require('mongoose');
+
 const SosRecord = require('../models/SosRecord');
 const socketService = require('../socket');
 
-// 去重时间容差：10 分钟（毫秒）
+const router = express.Router();
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
 
-/**
- * POST /api/sos/sync
- *
- * "数据骡子"恢复网络后批量上传暂存的 SOS 信号。
- *
- * 请求体示例：
- * {
- *   "muleId": "AA:BB:CC:DD:EE:FF",        // 骡子自身 MAC
- *   "records": [
- *     {
- *       "senderMac": "11:22:33:44:55:66",
- *       "longitude": 116.3974,
- *       "latitude":  39.9093,
- *       "bloodType": 0,
- *       "timestamp": "2024-06-15T08:30:00.000Z",
- *       "medicalProfile": {              // 可选：个人医疗档案
- *         "name": "张三",
- *         "age": "28",
- *         "bloodTypeDetail": 3,
- *         "medicalHistory": "无重大疾病",
- *         "allergies": "青霉素",
- *         "emergencyContact": "138-XXXX-1234"
- *       }
- *     },
- *     ...
- *   ]
- * }
- *
- * 响应体：
- * {
- *   "created": 3,    // 新插入条数
- *   "merged":  2,    // 已存在、仅追加骡子 ID 的条数
- *   "invalid": 1,    // 解析/校验失败条数
- *   "details": [...]  // 每条记录的处理结果
- * }
- */
 router.post('/sync', async (req, res) => {
-  const { muleId, records } = req.body;
+  const { muleId, records } = req.body || {};
 
-  // ── 基础校验 ──────────────────────────────────────────────
   if (!muleId || typeof muleId !== 'string') {
-    return res.status(400).json({ error: 'muleId 为必填字符串' });
+    return res.status(400).json({ error: 'muleId is required and must be a string.' });
   }
+
   if (!Array.isArray(records) || records.length === 0) {
-    return res.status(400).json({ error: 'records 必须为非空数组' });
+    return res.status(400).json({ error: 'records must be a non-empty array.' });
   }
+
   if (records.length > 1000) {
-    return res.status(400).json({ error: '单次上传不得超过 1000 条' });
+    return res.status(400).json({ error: 'A single sync request cannot exceed 1000 records.' });
   }
 
   const normalizedMuleId = muleId.toUpperCase().trim();
   const details = [];
-  let created = 0, merged = 0, invalid = 0;
+  let created = 0;
+  let merged = 0;
+  let invalid = 0;
 
-  // ── 逐条处理（串行保证同一批次内不会互相重复插入）──────────
-  for (const raw of records) {
+  for (const rawRecord of records) {
     try {
-      const record = normalizeRecord(raw);   // 标准化并校验字段
-      const medicalProfile = raw.medicalProfile || {}; // 提取医疗档案
-      const result = await upsertSosRecord(record, normalizedMuleId, medicalProfile);
+      const normalizedRecord = normalizeRecord(rawRecord);
+      const medicalProfile = normalizeMedicalProfile(rawRecord.medicalProfile);
+      const result = await upsertSosRecord(
+        normalizedRecord,
+        normalizedMuleId,
+        medicalProfile,
+      );
 
       if (result.action === 'created') {
-        created++;
-        // 立刻广播新 SOS 到前端大屏
+        created += 1;
         socketService.broadcastNewSos(result.doc);
       } else {
-        merged++;
+        merged += 1;
       }
 
       details.push({
-        senderMac: record.senderMac,
+        senderMac: normalizedRecord.senderMac,
         action: result.action,
         id: result.doc._id,
       });
-    } catch (err) {
-      invalid++;
-      details.push({ raw, action: 'invalid', reason: err.message });
+    } catch (error) {
+      invalid += 1;
+      details.push({
+        raw: rawRecord,
+        action: 'invalid',
+        reason: error.message,
+      });
     }
   }
 
   return res.status(200).json({ created, merged, invalid, details });
 });
 
-/**
- * GET /api/sos/active
- *
- * 返回所有 status === 'active' 的求救点，供大屏初次渲染地图使用。
- * 按 timestamp 降序（最新的排在前面）。
- */
 router.get('/active', async (req, res) => {
   try {
     const activeSos = await SosRecord.find({ status: 'active' })
       .sort({ timestamp: -1 })
-      .lean({ virtuals: true }); // lean 提升读性能，virtuals:true 保留 confidence
+      .lean({ virtuals: true });
 
     return res.status(200).json({
       count: activeSos.length,
       data: activeSos,
     });
-  } catch (err) {
-    console.error('[GET /active]', err);
-    return res.status(500).json({ error: '服务器内部错误' });
+  } catch (error) {
+    console.error('[GET /active]', error);
+    return res.status(500).json({ error: 'Failed to load active SOS records.' });
   }
 });
 
-// ════════════════════════════════════════════════════════════
-//  工具函数
-// ════════════════════════════════════════════════════════════
+router.delete('/:id', async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Invalid SOS record id.' });
+    }
 
-/**
- * 将请求体中的单条原始记录标准化为写入 DB 的格式。
- * 抛出 Error 表示校验失败。
- */
+    const deletedRecord = await SosRecord.findByIdAndDelete(req.params.id);
+    if (!deletedRecord) {
+      return res.status(404).json({ error: 'SOS record not found.' });
+    }
+
+    socketService.broadcastDeletedSos(deletedRecord);
+
+    return res.status(200).json({
+      success: true,
+      id: req.params.id,
+    });
+  } catch (error) {
+    console.error('[DELETE /:id]', error);
+    return res.status(500).json({ error: 'Failed to delete SOS record.' });
+  }
+});
+
 function normalizeRecord(raw) {
-  const { senderMac, longitude, latitude, bloodType, timestamp } = raw;
+  const { senderMac, longitude, latitude, bloodType, timestamp } = raw || {};
 
   if (!senderMac || typeof senderMac !== 'string') {
-    throw new Error('senderMac 缺失或类型错误');
-  }
-  const lon = parseFloat(longitude);
-  const lat = parseFloat(latitude);
-  if (isNaN(lon) || isNaN(lat)) {
-    throw new Error('longitude / latitude 必须为数字');
-  }
-  if (lon < -180 || lon > 180 || lat < -90 || lat > 90) {
-    throw new Error('经纬度超出合法范围');
+    throw new Error('senderMac is required and must be a string.');
   }
 
-  const ts = new Date(timestamp);
-  if (isNaN(ts.getTime())) {
-    throw new Error('timestamp 不是合法的日期字符串');
+  const longitudeNumber = Number.parseFloat(longitude);
+  const latitudeNumber = Number.parseFloat(latitude);
+
+  if (Number.isNaN(longitudeNumber) || Number.isNaN(latitudeNumber)) {
+    throw new Error('longitude and latitude must be valid numbers.');
   }
+
+  if (
+    longitudeNumber < -180 ||
+    longitudeNumber > 180 ||
+    latitudeNumber < -90 ||
+    latitudeNumber > 90
+  ) {
+    throw new Error('longitude or latitude is out of range.');
+  }
+
+  const parsedTimestamp = new Date(timestamp);
+  if (Number.isNaN(parsedTimestamp.getTime())) {
+    throw new Error('timestamp must be a valid date string.');
+  }
+
+  const parsedBloodType = Number.parseInt(bloodType, 10);
 
   return {
     senderMac: senderMac.toUpperCase().trim(),
-    location: { type: 'Point', coordinates: [lon, lat] },
-    bloodType: Number.isInteger(bloodType) ? bloodType : -1,
-    timestamp: ts,
+    location: {
+      type: 'Point',
+      coordinates: [longitudeNumber, latitudeNumber],
+    },
+    bloodType: Number.isInteger(parsedBloodType) ? parsedBloodType : -1,
+    timestamp: parsedTimestamp,
   };
 }
 
-/**
- * 核心去重逻辑：
- *   - 在 [timestamp - DEDUP_WINDOW_MS, timestamp + DEDUP_WINDOW_MS] 窗口内
- *     查找同一 senderMac 的记录。
- *   - 找到 → 追加骡子 ID（$addToSet 防止同一骡子重复记录）。
- *   - 未找到 → 新建文档。
- *
- * @param {Object} record - 标准化的求救记录
- * @param {String} muleId - 数据骡子 MAC 地址
- * @param {Object} medicalProfile - 可选的个人医疗档案信息
- * @returns {{ action: 'created'|'merged', doc: mongoose.Document }}
- */
+function normalizeMedicalProfile(rawProfile) {
+  if (!rawProfile || typeof rawProfile !== 'object') {
+    return {};
+  }
+
+  const profile = {
+    name: String(rawProfile.name || '').trim(),
+    age: String(rawProfile.age || '').trim(),
+    bloodTypeDetail: Number.isInteger(rawProfile.bloodTypeDetail)
+      ? rawProfile.bloodTypeDetail
+      : -1,
+    medicalHistory: String(rawProfile.medicalHistory || '').trim(),
+    allergies: String(rawProfile.allergies || '').trim(),
+    emergencyContact: String(rawProfile.emergencyContact || '').trim(),
+  };
+
+  return Object.values(profile).some((value) => value !== '' && value !== -1)
+    ? profile
+    : {};
+}
+
 async function upsertSosRecord(record, muleId, medicalProfile = {}) {
   const windowStart = new Date(record.timestamp.getTime() - DEDUP_WINDOW_MS);
-  const windowEnd   = new Date(record.timestamp.getTime() + DEDUP_WINDOW_MS);
+  const windowEnd = new Date(record.timestamp.getTime() + DEDUP_WINDOW_MS);
 
-  const existing = await SosRecord.findOne({
+  const existingRecord = await SosRecord.findOne({
     senderMac: record.senderMac,
     timestamp: { $gte: windowStart, $lte: windowEnd },
   });
 
-  if (existing) {
-    // 已存在：追加骡子 MAC，提升置信度
-    await SosRecord.updateOne(
-      { _id: existing._id },
-      { 
-        $addToSet: { reportedBy: muleId },
-        // 如果有新的医疗档案信息，也更新
-        ...(Object.keys(medicalProfile).length > 0 && {
-          $set: { medicalProfile }
-        })
-      }
-    );
-    existing.reportedBy = [...new Set([...existing.reportedBy, muleId])];
+  if (existingRecord) {
+    const update = {
+      $addToSet: { reportedBy: muleId },
+    };
+
     if (Object.keys(medicalProfile).length > 0) {
-      existing.medicalProfile = medicalProfile;
+      update.$set = { medicalProfile };
     }
-    return { action: 'merged', doc: existing };
+
+    await SosRecord.updateOne({ _id: existingRecord._id }, update);
+    existingRecord.reportedBy = [...new Set([...existingRecord.reportedBy, muleId])];
+
+    if (Object.keys(medicalProfile).length > 0) {
+      existingRecord.medicalProfile = medicalProfile;
+    }
+
+    return { action: 'merged', doc: existingRecord };
   }
 
-  // 全新求救：插入并广播
-  const newDoc = await SosRecord.create({
+  const createdRecord = await SosRecord.create({
     ...record,
     reportedBy: [muleId],
     medicalProfile: Object.keys(medicalProfile).length > 0 ? medicalProfile : undefined,
   });
-  return { action: 'created', doc: newDoc };
+
+  return { action: 'created', doc: createdRecord };
 }
 
 module.exports = router;

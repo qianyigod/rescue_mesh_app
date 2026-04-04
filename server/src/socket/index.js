@@ -1,34 +1,45 @@
 let _io = null;
 
-/**
- * 初始化 Socket.io 实例（在 index.js 中调用一次）
- */
 function init(io) {
   _io = io;
 
   io.on('connection', (socket) => {
-    console.log(`[Socket.io] 大屏客户端已连接: ${socket.id}`);
+    console.log(`[Socket.io] Dashboard connected: ${socket.id}`);
 
     socket.on('disconnect', (reason) => {
-      console.log(`[Socket.io] 客户端断开 (${socket.id}): ${reason}`);
+      console.log(`[Socket.io] Dashboard disconnected (${socket.id}): ${reason}`);
     });
   });
 
-  console.log('[Socket.io] 实时推送服务已就绪');
+  console.log('[Socket.io] Realtime push service is ready');
 }
 
-/**
- * 向所有已连接的大屏广播新 SOS 告警
- *
- * @param {object} sosDoc - Mongoose SosRecord 文档（会自动序列化为 JSON）
- */
 function broadcastNewSos(sosDoc) {
   if (!_io) {
-    console.warn('[Socket.io] 尚未初始化，无法广播');
+    console.warn('[Socket.io] Socket server is not initialized, cannot broadcast new SOS');
     return;
   }
+
   _io.emit('new_sos_alert', sosDoc.toJSON());
-  console.log(`[Socket.io] 广播 new_sos_alert -> MAC: ${sosDoc.senderMac}`);
+  console.log(`[Socket.io] Broadcast new_sos_alert -> MAC: ${sosDoc.senderMac}`);
 }
 
-module.exports = { init, broadcastNewSos };
+function broadcastDeletedSos(sosDoc) {
+  if (!_io) {
+    console.warn('[Socket.io] Socket server is not initialized, cannot broadcast deleted SOS');
+    return;
+  }
+
+  _io.emit('sos_deleted', {
+    id: String(sosDoc._id),
+    senderMac: sosDoc.senderMac,
+    timestamp: sosDoc.timestamp,
+  });
+  console.log(`[Socket.io] Broadcast sos_deleted -> MAC: ${sosDoc.senderMac}`);
+}
+
+module.exports = {
+  init,
+  broadcastNewSos,
+  broadcastDeletedSos,
+};
