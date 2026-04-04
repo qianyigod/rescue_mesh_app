@@ -1,11 +1,12 @@
 # Rescue Mesh — Developer Guide
 
 > **项目代号:** RESCUE MESH · 离线应急救援网络
-> **文档状态:** v1.0 · 2026-03-21 · 
+> **文档版本:** v2.0 · 2026-04-04 · 全面更新
+> **适用 SDK:** Flutter 3.11+ · Dart 3.11+
 
 ---
 
-## 🌍 项目代号与愿景
+## 🌍 项目愿景
 
 **一句话价值主张：** 在完全断网的极端灾害现场，让每一部手机都成为生命接力站——遇险者的求救信号通过蓝牙 Mesh 跳传至拥有网络的"数据骡子"，再批量上报至云端大屏，守护每一条不能失联的生命。
 
@@ -13,17 +14,40 @@
 
 ```
 [ 遇险者手机 ]
-  ├─ 端侧 AI (llama.cpp) 辅助填写医疗档案
-  └─ BLE Manufacturer Data 广播 SOS 信标 (10字节)
+  ├─ 端侧 AI (fcllama / llama.cpp) 辅助填写医疗档案
+  └─ BLE Manufacturer Data 广播 SOS 信标 (14字节)
          ↓ 蓝牙扫描 (30秒本地去重)
 [ 数据骡子手机 ]  (路过现场的任意用户)
-  └─ flutter_blue_plus 接收 → Drift/SQLite 本地存储
+  ├─ flutter_blue_plus 接收 → Drift/SQLite 本地存储
+  ├─ Riverpod MeshState 实时更新
+  └─ 声呐雷达 / 离线战术地图 可视化
          ↓ 网络恢复时自动触发 (connectivity_plus)
 [ Node.js 后端 ]
   └─ POST /api/sos/sync → 10分钟窗口服务端去重 → MongoDB 持久化
-         ↓ Socket.io 实时推送   
+         ↓ Socket.io 实时推送
 [ Vue 3 大屏 ]
   └─ Leaflet 地图红点 + ECharts 图表 + AlertFeed 滚动告警
+```
+
+### 架构分层
+
+```
+┌─────────────────────────────────────────────────┐
+│                   UI Layer                      │
+│  Dashboard / Radar / Map / Profile / AI Chat    │
+├─────────────────────────────────────────────────┤
+│               State Management                  │
+│         Riverpod (MeshStateProvider)            │
+├─────────────────────────────────────────────────┤
+│               Service Layer                     │
+│ BleMesh │ Scanner │ Sync │ Dispatch │ PowerSave │
+├─────────────────────────────────────────────────┤
+│              Data / Protocol Layer              │
+│   Drift DB │ BLE Payload │ MBTiles │ Models     │
+├─────────────────────────────────────────────────┤
+│              Platform Layer                     │
+│   Android BLE Advertiser │ Foreground Service   │
+└─────────────────────────────────────────────────┘
 ```
 
 ---
@@ -34,36 +58,47 @@
 
 | 依赖 | 版本 | 用途 |
 |------|------|------|
-| `flutter_blue_plus` | 1.35.5 | BLE 广播 (SOS发送) + 扫描 (数据骡子接收) |
+| `flutter_blue_plus` | 1.35.5 | BLE 广播 (SOS 发送) + 扫描 (数据骡子接收) |
 | `drift` + `sqlite3_flutter_libs` | 2.19.0 / 0.5.24 | 本地 SQLite 持久化，含 Drift ORM 代码生成 |
+| `flutter_riverpod` + `riverpod_annotation` | 3.3.1 / 4.0.2 | 声明式状态管理，MeshState 全局共享 |
 | `connectivity_plus` | 6.0.3 | 监听网络状态，网络恢复时触发自动同步 |
 | `http` | 1.2.1 | HTTP POST 批量上报至后端 |
 | `permission_handler` | 11.3.1 | 运行时申请蓝牙/定位权限 |
 | `location` | 5.0.3 | 获取 GPS 坐标 |
-| `flutter_map` + `latlong2` | 6.1.0 / 0.9.1 | 移动端地图显示 |
-| `fcllama` / `llama_cpp_dart` | — | 端侧大模型推理（集成中） |
+| `flutter_map` + `latlong2` | 6.1.0 / 0.9.1 | 移动端离线地图渲染 |
+| `sqlite3` | 2.1.0 (+ override 3.1.5) | MBTiles 本地瓦片数据库读取 |
+| `flutter_background_service` | 5.0.5 | 前台后台服务，持续广播 SOS |
+| `flutter_local_notifications` | 17.2.1 | 常驻通知栏通知 |
+| `screen_brightness` | 2.1.7 | 极限省电模式降低屏幕亮度 |
+| `shared_preferences` | 2.3.2 | 轻量键值存储（省电模式开关、设备 ID） |
+| `fcllama` / `llama_cpp_dart` | 0.0.3 / 0.2.0 | 端侧大模型推理（离线急救问答） |
+| `camera` | 0.11.0 | AR 救援罗盘摄像头叠加 |
+| `sensors_plus` | 6.1.1 | 传感器数据（加速度计、陀螺仪） |
+| `geolocator` | 13.0.2 | 高精度定位服务 |
+| `vibration` | 2.0.1 | SOS 触发触觉反馈 |
+| `share_plus` / `url_launcher` | 12.0.1 / 6.3.2 | 分享功能与外部链接跳转 |
 
-> **BLE 广播实现细节：** Dart 层通过 Android Method Channel `rescue_mesh/advertiser` 调用原生 Kotlin/Java 实现广播，因 Flutter BLE 库在部分 Android 版本不支持主动广播。
+> **BLE 广播实现细节：** Dart 层通过 Android Method Channel `rescue_mesh/advertiser` 调用原生 Kotlin 实现广播。广播载荷为 **14 字节**二进制格式（v1 协议）。
 
 ### 后端 (Node.js)
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| `express` | 4.19.2 | REST API 框架 |
-| `mongoose` | 8.4.1 | MongoDB ODM，含 GeoJSON 2dsphere 索引 |
-| `socket.io` | 4.7.5 | 向大屏实时推送新 SOS 事件 |
-| `dotenv` | 16.4.5 | 环境变量管理 |
-| `cors` | 2.8.5 | 跨域支持 |
+| 依赖 | 用途 |
+|------|------|
+| `express` | REST API 框架 |
+| `mongoose` | MongoDB ODM，含 GeoJSON 2dsphere 索引 |
+| `socket.io` | 向大屏实时推送新 SOS 事件 |
+| `dotenv` | 环境变量管理 |
+| `cors` | 跨域支持 |
 
 ### 前端大屏 (Vue 3)
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| `vue` | 3.4.27 | 响应式 UI 框架 |
-| `echarts` | 5.5.0 | 血型分布玫瑰图 + 12小时趋势折线图 |
-| `leaflet` | 1.9.4 | 实时 SOS 地图（CartoDB Dark Matter 暗色底图） |
-| `socket.io-client` | 4.7.5 | 接收后端实时推送 |
-| `vite` | 5.2.11 | 构建工具 |
+| 依赖 | 用途 |
+|------|------|
+| `vue` | 响应式 UI 框架 |
+| `echarts` | 血型分布玫瑰图 + 12 小时趋势折线图 |
+| `leaflet` | 实时 SOS 地图（CartoDB Dark Matter 暗色底图） |
+| `socket.io-client` | 接收后端实时推送 |
+| `vite` | 构建工具 |
 
 ---
 
@@ -72,69 +107,80 @@
 ```
 rescue_mesh_app/
 │
-├── lib/                          # Flutter 移动端
-│   ├── main.dart                 # ★ 应用入口：4Tab导航 + 服务初始化编排
-│   ├── database.dart             # ★ Drift ORM：SosRecords/SosMessages 表定义 + 去重逻辑
-│   ├── database.g.dart           # [自动生成，勿手动修改] Drift 代码生成产物
+├── lib/                              # Flutter 移动端
+│   ├── main.dart                     # ★ 应用入口：5Tab导航 + 服务初始化编排
+│   ├── database.dart                 # ★ Drift ORM：3张表 + 去重逻辑 (schema v3)
+│   ├── database.g.dart               # [自动生成，勿手动修改]
 │   │
-│   ├── sos_page.dart             # UI：SOS 发送控制页（触发广播、获取GPS）
-│   ├── ai_chat_page.dart         # UI：端侧 AI 对话页（llama.cpp 集成中）
-│   ├── message_page.dart         # UI：收到的 SOS 消息列表
-│   ├── profile_page.dart         # UI：个人设置页
-│   ├── mesh_dashboard_page.dart  # UI：Mesh 网络状态看板
-│   ├── medical_profile_page.dart # UI：医疗档案（血型/过敏/既往病史）⭐待美化
+│   ├── sos_page.dart                 # UI：SOS 发送控制页
+│   ├── ai_chat_page.dart             # UI：端侧 AI 对话页（fcllama 集成）
+│   ├── message_page.dart             # UI：收到的 SOS 消息列表
+│   ├── profile_page.dart             # UI：个人设置页
+│   ├── mesh_dashboard_page.dart      # UI：Mesh 网络状态看板（雷达/地图双模式）
+│   ├── medical_profile_page.dart     # UI：医疗档案管理
+│   ├── ar_rescue_compass_page.dart   # UI：AR 救援罗盘
+│   ├── radar_demo_page.dart          # UI：声呐雷达独立演示页
 │   │
 │   ├── models/
-│   │   ├── sos_message.dart              # SOS 数据模型（MAC、坐标、血型、时间戳）
-│   │   ├── emergency_profile.dart        # BloodType 枚举 + EmergencyProfile 数据类
-│   │   └── sos_advertisement_payload.dart # BLE 广播载荷结构定义
+│   │   ├── sos_message.dart          # SOS 数据模型（MAC、坐标、血型、RSSI）
+│   │   ├── sos_payload.dart          # BLE 载荷解码后的纯数据类
+│   │   ├── sos_advertisement_payload.dart # BLE 广播载荷结构定义
+│   │   ├── emergency_profile.dart    # BloodType 枚举 + EmergencyProfile
+│   │   └── mesh_state_provider.dart  # ★ Riverpod 状态：MeshState / DiscoveredDevice
 │   │
 │   ├── services/
-│   │   ├── ble_mesh_service.dart         # ★ BLE 广播服务：startSosBroadcast/stopSosBroadcast
-│   │   ├── ble_scanner_service.dart      # ★ BLE 扫描服务：解析10字节载荷，30s窗口去重
-│   │   ├── network_sync_service.dart     # ★ 网络同步：监听连接变化，批量 POST /api/sos/sync
-│   │   ├── ble_mesh_exceptions.dart      # BLE 相关异常类型
-│   │   └── network_sync_exceptions.dart  # 网络同步异常类型
+│   │   ├── ble_mesh_service.dart     # ★ BLE 广播服务 + Relay Queue 中继队列
+│   │   ├── ble_scanner_service.dart  # ★ BLE 扫描服务：解析14字节载荷，30s去重
+│   │   ├── ble_payload_encoder.dart  # BLE 二进制编解码器（encode/decode）
+│   │   ├── ble_mesh_exceptions.dart  # BLE 异常类型体系
+│   │   ├── network_sync_service.dart # ★ 网络同步：connectivity 监听 + 批量 POST
+│   │   ├── network_sync_exceptions.dart # 网络同步异常类型
+│   │   ├── sos_dispatch_manager.dart # SOS 调度中心：探网→上云→近场广播
+│   │   ├── sos_trigger_service.dart  # SOS 触发服务：统一入口
+│   │   ├── background_service_manager.dart # 前台后台服务管理
+│   │   ├── power_saving_manager.dart # ★ 省电管理：GPS策略/BLE间隔/屏幕亮度
+│   │   └── mbtiles_reader.dart       # MBTiles 离线瓦片读取器
+│   │
+│   ├── widgets/
+│   │   ├── sonar_radar_widget.dart   # ★ 60fps 声呐雷达可视化
+│   │   ├── offline_tactical_map_view.dart # 离线战术地图（MBTiles + 脉冲标记）
+│   │   └── ultra_power_switch_widget.dart # 极限求生模式开关
 │   │
 │   └── theme/
-│       └── rescue_theme.dart             # 全局主题配置（颜色、字体）
+│       └── rescue_theme.dart         # 全局主题（RescuePalette + ThemeData）
 │
-├── server/                       # Node.js 后端
+├── server/                           # Node.js 后端
 │   ├── src/
-│   │   ├── index.js              # ★ 应用入口：Express + Socket.io + MongoDB 初始化
-│   │   ├── models/
-│   │   │   └── SosRecord.js      # ★ Mongoose Schema：GeoJSON Point、2dsphere索引、confidence虚拟字段
-│   │   ├── routes/
-│   │   │   └── sos.js            # ★ 核心路由：POST /api/sos/sync（去重上报）+ GET /api/sos/active
-│   │   └── socket/
-│   │       └── index.js          # Socket.io 模块：init() + broadcastNewSos()
-│   │
-│   ├── .env                      # 本地环境变量（不入库，需手动创建）
-│   ├── .env.example              # 环境变量模板
+│   │   ├── index.js                  # Express + Socket.io + MongoDB 初始化
+│   │   ├── models/SosRecord.js       # Mongoose Schema + GeoJSON 索引
+│   │   ├── routes/sos.js             # POST /api/sos/sync + GET /api/sos/active
+│   │   └── socket/index.js           # Socket.io 模块
+│   ├── .env / .env.example           # 环境变量
 │   └── package.json
 │
-├── dashboard/                    # Vue 3 大屏前端
+├── dashboard/                        # Vue 3 指挥大屏
 │   ├── src/
-│   │   ├── main.js               # Vue 3 应用挂载入口
-│   │   ├── App.vue               # ★ 根组件：三栏 Grid 布局 + 顶部状态栏（时钟/连接状态）
-│   │   ├── style.css             # 全局暗色主题 + 动画（blink/sos-ring/scan-line）
-│   │   │
+│   │   ├── main.js / App.vue         # 应用入口 + 三栏 Grid 布局
+│   │   ├── style.css                 # 暗色主题 + 动画定义
 │   │   ├── components/
-│   │   │   ├── AlertFeed.vue     # ★ 左侧：SOS 告警滚动列表（TransitionGroup，最多300条）
-│   │   │   ├── MapComponent.vue  # ★ 中央：Leaflet 地图 + 脉冲 DivIcon 红点标记
-│   │   │   └── StatsComponent.vue# ★ 右侧：ECharts 血型玫瑰图 + 12小时趋势折线图
-│   │   │
-│   │   └── composables/
-│   │       └── useSocket.js      # ★ 全局状态单例：Socket.io连接 + 响应式alerts/bloodCounts
-│   │
-│   ├── index.html
-│   └── package.json
+│   │   │   ├── AlertFeed.vue         # SOS 告警滚动列表
+│   │   │   ├── MapComponent.vue      # Leaflet 地图 + 脉冲红点
+│   │   │   └── StatsComponent.vue    # ECharts 血型玫瑰 + 趋势折线
+│   │   └── composables/useSocket.js  # Socket.io 连接 + 响应式状态
+│   ├── index.html / package.json
+│   └── vite.config.js
 │
-├── assets/                       # 静态资源（模型文件、图片等）
-├── android/                      # Android 原生层（含 BLE 广播 Method Channel 实现）
-├── ios/                          # iOS 原生层
-├── pubspec.yaml                  # Flutter 依赖声明
-└── README.md
+├── test/                             # 单元测试
+│   ├── ble_payload_encoder_test.dart
+│   ├── ble_scanner_service_test.dart
+│   ├── database_test.dart
+│   ├── network_sync_service_test.dart
+│   ├── sos_advertisement_payload_test.dart
+│   └── widget_test.dart
+│
+├── assets/models/                    # AI 模型文件
+├── android/                          # Android 原生层（含 BLE 广播 Method Channel）
+└── pubspec.yaml                      # Flutter 依赖声明
 ```
 
 ---
@@ -143,78 +189,34 @@ rescue_mesh_app/
 
 > ⚠️ **Localhost 陷阱 — 必读！**
 >
-> 移动端真机 和 大屏浏览器 都不在你的电脑上运行，它们无法通过 `localhost` 或 `127.0.0.1` 访问你的后端。
-> 你**必须**使用电脑在局域网内的真实 IPv4 地址。
+> 移动端真机和大屏浏览器都无法通过 `localhost` 或 `127.0.0.1` 访问你的后端，**必须**使用电脑的局域网 IPv4 地址。
 >
 > **获取局域网 IP：**
-> ```bash
-> # Windows
+> ```powershell
 > ipconfig
-> # 找 "以太网适配器" 或 "WLAN" 下的 IPv4 地址，例如 192.168.1.105
->
-> # macOS / Linux
-> ifconfig | grep "inet "
+> # 找 "WLAN" 或 "以太网适配器" 下的 IPv4 地址
 > ```
 >
-> 后续步骤中，将所有 `<YOUR_LAN_IP>` 替换为你获取到的 IP 地址。
-> **所有设备（手机、浏览器）必须连接同一个 Wi-Fi 网络！**
-
----
+> 后续步骤中，将所有 `<YOUR_LAN_IP>` 替换为你的 IP 地址。
+> **所有设备（手机、浏览器）必须连接同一个 Wi-Fi！**
 
 ### Step 1：启动后端 (Node.js)
 
-**1. 创建 `.env` 文件**
-
-在 `server/` 目录下，复制 `.env.example` 并填写：
-
 ```bash
 cd server
-cp .env.example .env
-```
-
-编辑 `server/.env`：
-
-```env
-PORT=3000
-MONGODB_URI=mongodb://localhost:27017/rescue_mesh
-# 若使用 MongoDB Atlas，替换为你的连接字符串
-```
-
-**2. 安装依赖并启动**
-
-```bash
-cd server
+cp .env.example .env    # 或使用 copy .env.example .env (Windows)
+# 编辑 .env，填写 MONGODB_URI
 npm install
 node src/index.js
 ```
 
-启动成功后你应看到：
+启动成功后应看到：
 ```
 [Server] MongoDB connected
 [Server] Listening on http://0.0.0.0:3000
 ```
 
-> 确保 MongoDB 已在本地运行（`mongod`），或使用 Atlas 云数据库。
-
----
-
 ### Step 2：启动大屏前端 (Vue 3)
-
-**1. 修改后端连接地址**
-
-打开 [dashboard/src/composables/useSocket.js](dashboard/src/composables/useSocket.js)，找到 Socket.io 连接初始化部分，将地址改为：
-
-```js
-// 修改前（示例）
-const socket = io('http://localhost:3000')
-
-// 修改后
-const socket = io('http://<YOUR_LAN_IP>:3000')
-```
-
-同时检查 `fetchActive` 函数中的 REST API 地址是否也需要同步修改。
-
-**2. 安装依赖并启动**
 
 ```bash
 cd dashboard
@@ -222,338 +224,379 @@ npm install
 npm run dev
 ```
 
-Vite 启动后访问 `http://localhost:5173`，在大屏上应能看到连接状态变为绿色。
-
----
+修改 [dashboard/src/composables/useSocket.js](dashboard/src/composables/useSocket.js) 中的 Socket.io 连接地址为 `http://<YOUR_LAN_IP>:3000`。
 
 ### Step 3：运行移动端 (Flutter)
 
-**1. 修改后端同步地址**
-
-打开 [lib/services/network_sync_service.dart](lib/services/network_sync_service.dart)，找到 API endpoint 配置：
-
-```dart
-// 修改前（生产环境地址）
-static const String _syncUrl = 'https://api.rescuemesh.com/v1/sos/sync';
-
-// 修改后（局域网调试）
-static const String _syncUrl = 'http://<YOUR_LAN_IP>:3000/api/sos/sync';
-```
-
-**2. 连接真机并运行**
-
 ```bash
-# 查看已连接设备
+flutter pub get
 flutter devices
-
-# 运行到指定设备（推荐真机，模拟器不支持 BLE 广播）
 flutter run -d <device_id>
 ```
 
-> **Android 权限提示：** 首次运行需在手机上允许蓝牙、定位权限。部分 Android 12+ 设备需要同时开启"附近设备"权限。
+**修改后端同步地址：** 打开 [lib/services/network_sync_service.dart](lib/services/network_sync_service.dart)，将 `_endpoint` 改为 `http://<YOUR_LAN_IP>:3000/api/sos/sync`。
 
-**3. 重新生成 Drift 代码（若修改了 database.dart）**
-
+**重新生成 Drift 代码（若修改了 database.dart）：**
 ```bash
 dart run build_runner build
 ```
-
----
 
 ### 联调验证清单
 
 - [ ] 后端控制台无报错，MongoDB 已连接
 - [ ] 大屏左上角显示绿色"已连接"状态
-- [ ] 手机 App 能正常启动，四个 Tab 可切换
+- [ ] 手机 App 能正常启动，各 Tab 可切换
 - [ ] 在手机 SOS 页触发广播，另一台手机能扫描到信号
-- [ ] 手机网络恢复后，大屏自动出现新的 SOS 告警卡片和地图红点
+- [ ] 手机网络恢复后，大屏自动出现新的 SOS 告警
 
 ---
 
 ## 📡 关键数据结构速查
 
-### BLE 广播载荷 (10 字节)
+### BLE 广播载荷 (14 字节 · v1 协议)
 
-```
-Byte 0      : SOS flag (0x01 = 求救中)
-Bytes 1-4   : latitude  (float32, little-endian)
-Bytes 5-8   : longitude (float32, little-endian)
-Byte 9      : bloodType code
-```
+| 偏移 | 长度 | 类型 | 字段 |
+|------|------|------|------|
+| 0 | 1 | uint8 | 协议版本号 (0x01) |
+| 1 | 1 | uint8 | 血型编码 (0-255) |
+| 2 | 4 | float32 LE | 纬度 |
+| 6 | 4 | float32 LE | 经度 |
+| 10 | 4 | uint32 LE | UTC Unix 时间戳 (秒) |
 
-### 批量同步请求体 (POST /api/sos/sync)
-
-```json
-{
-  "muleId": "AA:BB:CC:DD:EE:FF",
-  "records": [
-    {
-      "senderMac": "11:22:33:44:55:66",
-      "latitude": 39.9093,
-      "longitude": 116.3974,
-      "bloodType": 0,
-      "timestamp": "2024-06-15T08:30:00.000Z"
-    }
-  ]
-}
-```
+编解码由 [lib/services/ble_payload_encoder.dart](lib/services/ble_payload_encoder.dart) 处理。
 
 ### 血型编码对照表
 
-| Flutter 枚举 | MongoDB 存储值 | 大屏显示 | 颜色 |
-|-------------|--------------|---------|------|
-| `unknown(0)` | `-1` | 未知 | `#9966FF` |
-| `a(1)` | `0` | A型 | `#FF6B6B` |
-| `b(2)` | `1` | B型 | `#4BC0C0` |
-| `ab(3)` | `2` | AB型 | `#FFCE56` |
-| `o(4)` | `3` | O型 | `#00E5FF` |
-
-> ⚠️ **已知不一致：** Flutter 枚举值 (`0-4`) 与 MongoDB 存储值 (`-1,0,1,2,3`) 存在偏移，`network_sync_service.dart` 中需确认映射转换逻辑是否正确。
+| Flutter 枚举 | code | 显示 | 颜色 |
+|-------------|------|------|------|
+| `unknown` | -1 | 未知 | `#9966FF` |
+| `a` | 0 | A 型 | `#FF6B6B` |
+| `b` | 1 | B 型 | `#4BC0C0` |
+| `ab` | 2 | AB 型 | `#FFCE56` |
+| `o` | 3 | O 型 | `#00E5FF` |
 
 ### 三层去重机制
 
 | 层级 | 位置 | 去重窗口 | 依据 |
 |------|------|---------|------|
-| BLE 扫描层 | `ble_scanner_service.dart` | 30 秒 | fingerprint (MAC+坐标) |
-| 本地数据库层 | `database.dart` | 5 分钟 | senderMac + 时间戳 |
+| BLE 扫描层 | [ble_scanner_service.dart](lib/services/ble_scanner_service.dart) | 30 秒 | fingerprint (MAC+坐标) |
+| 本地数据库层 | [database.dart](lib/database.dart) | 5 分钟 | senderMac + 时间戳 |
 | 服务端层 | `server/src/routes/sos.js` | 10 分钟 | senderMac + 时间戳 |
 
 ---
 
-## � Riverpod 状态管理与声呐雷达
+## 🏗️ 服务层详解
+
+### 1. BleMeshService — BLE 广播服务
+
+**文件：** [lib/services/ble_mesh_service.dart](lib/services/ble_mesh_service.dart)
+
+**职责：**
+- 通过 Android Method Channel 控制 BLE 广播的启停
+- 管理广播状态流 (`Stream<bool>`)
+- 支持 **Relay Queue 中继队列**：缓存待广播的 SOS 消息，依次发送
+- 权限检查与适配器状态监听
+
+**核心 API：**
+```dart
+Future<void> initialize();          // 初始化（检查权限 + 适配器）
+Future<void> startSosBroadcast();   // 开始广播自身 SOS
+Future<void> stopSosBroadcast();    // 停止广播
+bool get isBroadcasting;            // 当前广播状态
+Stream<bool> get broadcastingStream; // 广播状态流
+```
+
+### 2. BleScannerService — BLE 扫描服务
+
+**文件：** [lib/services/ble_scanner_service.dart](lib/services/ble_scanner_service.dart)
+
+**职责：**
+- 持续扫描 BLE 广播包（Company ID: `0xFFFF`）
+- 解析 14 字节 SOS 载荷
+- 30 秒窗口内基于 fingerprint 的去重
+- 将有效 SOS 消息写入本地数据库
+
+**核心 API：**
+```dart
+Future<void> initialize();
+Future<void> startScanning();
+Future<void> stopScanning();
+Stream<SosMessage> get sosMessageStream;  // 接收到的 SOS 流
+```
+
+### 3. BlePayloadEncoder — 二进制编解码器
+
+**文件：** [lib/services/ble_payload_encoder.dart](lib/services/ble_payload_encoder.dart)
+
+**职责：**
+- `encodeSosData()`：将经纬度、血型、时间戳编码为 14 字节数组
+- `decodeSosData()`：将原始字节解码为 `SosPayload` 对象
+- 输入验证（坐标范围、血型范围、时间戳范围）
+
+**协议常量：**
+```dart
+static const int protocolVersion = 0x01;
+static const int payloadLength = 14;
+static const Endian byteOrder = Endian.little;
+```
+
+### 4. NetworkSyncService — 网络同步服务
+
+**文件：** [lib/services/network_sync_service.dart](lib/services/network_sync_service.dart)
+
+**职责：**
+- 监听网络连通性变化（`connectivity_plus`）
+- 网络恢复时自动触发同步
+- 从 Drift DB 查询 `isUploaded = false` 的记录
+- 批量 POST 至后端 `/api/sos/sync`
+- 同步成功后标记 `isUploaded = true`
+
+**核心 API：**
+```dart
+Future<void> startListening();  // 开始监听网络变化
+Future<int> syncNow();          // 立即执行同步，返回上传数量
+bool get hasNetwork;            // 当前是否有可用网络
+DateTime? get lastSuccessfulSyncAt;
+```
+
+**依赖注入：** 支持通过构造函数注入 `AppDatabase`、`Connectivity`、`http.Client` 等，便于测试。
+
+### 5. SosDispatchManager — SOS 调度中心
+
+**文件：** [lib/services/sos_dispatch_manager.dart](lib/services/sos_dispatch_manager.dart)
+
+**职责：** 统一管理 SOS 信号的发送路径
+1. **探网**：检查当前网络连接状态
+2. **上云**：网络可用时发送 HTTP POST 到后端
+3. **近场/兜底**：无论网络状态，始终启动 BLE 广播
+
+**单例模式：** `SosDispatchManager.instance.triggerSos(payload)`
+
+### 6. SosTriggerService — SOS 触发服务
+
+**文件：** [lib/services/sos_trigger_service.dart](lib/services/sos_trigger_service.dart)
+
+**职责：** 提供统一的 SOS 触发入口，协调数据库写入、BLE 广播和网络同步。
+
+**返回值：** `SosTriggerResult` 包含消息 ID、坐标、上传状态及各通道错误信息。
+
+### 7. PowerSavingManager — 省电管理
+
+**文件：** [lib/services/power_saving_manager.dart](lib/services/power_saving_manager.dart)
+
+**职责：**
+- **极限求生模式**开关（持久化到 SharedPreferences）
+- GPS 策略切换：
+  - 标准模式：高精度持续监听，1 秒间隔
+  - 极限模式：省电模式单次定位，5 分钟间隔，250 米距离过滤器
+- BLE 广播间隔调节：标准 1 秒 → 极限 5 秒
+- 屏幕亮度自动降至 5%
+- 应用生命周期感知（前后台切换时自动调整策略）
+
+**核心 API：**
+```dart
+Future<void> setUltraPowerSavingMode(bool enabled);
+bool get isUltraPowerSavingMode;
+GpsUpdatePolicy getGpsUpdatePolicy();
+Duration getBleAdvertiseInterval();
+```
+
+### 8. BackgroundServiceManager — 前台后台服务管理
+
+**文件：** [lib/services/background_service_manager.dart](lib/services/background_service_manager.dart)
+
+**职责：**
+- 使用 `flutter_background_service` 维持后台持续运行
+- 配置常驻通知栏通知（标题、内容、渠道 ID）
+- 在后台 Isolate 中持续广播 SOS 信号
+- 通过静态字段在 Isolate 间共享位置/血型数据
+
+**核心 API：**
+```dart
+Future<void> initializeService();  // 初始化并启动
+Future<void> startService();       // 启动前台服务
+Future<void> stopService();        // 停止服务
+```
+
+### 9. MbtilesReader — 离线瓦片读取器
+
+**文件：** [lib/services/mbtiles_reader.dart](lib/services/mbtiles_reader.dart)
+
+**职责：**
+- 从本地 MBTiles 文件读取地图瓦片
+- 使用 `sqlite3` 直接查询瓦片数据
+- 支持元数据读取（缩放级别、中心点、格式等）
+
+**MBTiles 规范：** 遵循 [MapBox MBTiles 规范](https://github.com/mapbox/mbtiles-spec)，底层为 SQLite 数据库，包含 `tiles` 表和 `metadata` 表。
+
+---
+
+## 📊 Riverpod 状态管理
 
 ### 架构设计
 
-为了高效处理高频 BLE SOS 广播包，避免频繁 `setState` 导致 UI 卡顿，我们采用了 **Riverpod** 进行全局状态管理，并实现了一个高性能的"声呐雷达"可视化组件。
+项目采用 **Riverpod** 进行全局状态管理，替代传统的 `ChangeNotifier` + `InheritedWidget` 模式，避免高频 BLE 事件导致的 UI 卡顿。
 
-#### 核心文件结构
+**核心文件：**
+- [lib/models/mesh_state_provider.dart](lib/models/mesh_state_provider.dart) — 状态定义
+- [lib/models/mesh_state_provider.g.dart](lib/models/mesh_state_provider.g.dart) — 自动生成（勿修改）
 
-```
-lib/
-  models/
-    mesh_state_provider.dart       # Riverpod 状态定义
-    mesh_state_provider.g.dart     # 自动生成的代码（勿手动修改）
-  widgets/
-    sonar_radar_widget.dart        # 高性能雷达组件
-```
-
-### 状态管理器 (`mesh_state_provider.dart`)
-
-**核心特性：**
-
-- **智能去重**: 通过 MAC 地址识别设备，仅在时间戳或 RSSI 显著变化时更新状态
-- **性能优化**: 避免无效的频繁重建，减少 UI 刷新次数
-- **自动清理**: 支持移除超时设备，保持内存整洁
-
-**状态对象：**
+### 状态对象
 
 ```dart
+@immutable
+class DiscoveredDevice {
+  final String macAddress;
+  final SosPayload payload;
+  final int rssi;
+  final DateTime firstDiscoveredAt;
+  final DateTime lastUpdatedAt;
+
+  double get estimatedDistance;  // 基于 RSSI 的距离估算（米）
+  DiscoveredDevice copyWith({...});
+}
+
+@immutable
 class MeshState {
-  final Map<String, DiscoveredDevice> discoveredDevices; // MAC -> 设备映射
-  final DateTime? lastScanTime;     // 最后扫描时间
-  final bool isScanning;            // 扫描状态
-  
-  List<DiscoveredDevice> get sortedDevices;  // 按更新时间排序
-  List<DiscoveredDevice> get activeDevices;  // 最近 30 秒活跃设备
+  final Map<String, DiscoveredDevice> discoveredDevices;
+  // ... sortedDevices, activeDevices 等派生属性
 }
 ```
 
-**使用方法：**
+### 使用方法
 
 ```dart
-// 1. 在 BLE 扫描回调中添加设备
-final notifier = ref.read(meshStateProvider.notifier);
-notifier.addOrUpdateDevice(macAddress, sosPayload, rssi);
+// 在 BLE 扫描回调中添加设备
+ref.read(meshStateProvider.notifier).addOrUpdateDevice(mac, payload, rssi);
 
-// 2. 在 UI 中监听状态变化
+// 在 UI 中监听
 final meshState = ref.watch(meshStateProvider);
 final devices = meshState.sortedDevices;
 ```
 
-**RSSI 距离估算：**
+### RSSI 距离估算
 
-`DiscoveredDevice`提供了基于 RSSI 的距离估算方法：
+`DiscoveredDevice.estimatedDistance` 基于对数路径损耗模型：
 
 ```dart
-final distance = device.estimatedDistance; // 单位：米（估算值）
+double get estimatedDistance {
+  const int txPower = -59;  // 假设发射功率
+  final ratio = rssi.toDouble() / txPower;
+  if (ratio < 1.0) {
+    return math.pow(ratio, 10).toDouble();
+  } else {
+    return (0.89976 * math.pow(ratio, 7.7095) + 0.111);
+  }
+}
 ```
 
-> ⚠️ **注意**: RSSI 测距受环境影响较大，仅供可视化参考，不建议用于精确定位。
+> ⚠️ **注意：** RSSI 测距受环境影响极大（障碍物、多径效应），仅供可视化参考。
+
+### 最佳实践
+
+1. **使用 `ref.watch()` 而非 `ref.read()`** 在 build 方法中
+2. **定期清理过期设备**：调用 `notifier.removeStaleDevices(60)`
+3. **避免在 build 中创建新对象**，Riverpod 会通过 `==` 比较避免不必要的重建
 
 ---
 
-### 声呐雷达组件 (`sonar_radar_widget.dart`)
+## 🗺️ 离线地图与 MBTiles
 
-**性能特性：**
+### 架构
 
-- **60fps 流畅动画**: 使用 `CustomPainter` 直接绘制，避免 Widget 树过度重建
-- **局部刷新**: 仅雷达区域重绘，不影响父组件
-- **淡入动画**: 新设备出现时有平滑的 FadeIn 过渡
-- **脉冲效果**: 每个设备光点带有呼吸灯效果
+```
+MBTiles 文件 (sqlite3 格式)
+       ↓
+MbtilesReader 读取瓦片
+       ↓
+flutter_map TileProvider 渲染
+       ↓
+离线战术地图视图 + 脉冲求救标记
+```
 
-**视觉效果：**
+### 关键文件
+
+| 文件 | 职责 |
+|------|------|
+| [lib/services/mbtiles_reader.dart](lib/services/mbtiles_reader.dart) | 从 MBTiles 文件读取瓦片 + 元数据 |
+| [lib/widgets/offline_tactical_map_view.dart](lib/widgets/offline_tactical_map_view.dart) | 地图视图 + 脉冲 SOS 标记 |
+| [lib/mesh_dashboard_page.dart](lib/mesh_dashboard_page.dart) | 地图模式切换（雷达 ↔ 地图） |
+
+### 使用说明
+
+1. 将 MBTiles 文件放置到 `{appDir}/maps/tactical.mbtiles`
+2. 地图视图会自动检测并加载
+3. 文件不存在时优雅降级显示空白地图
+4. 求救者位置通过 Riverpod `meshStateProvider` 实时同步
+5. 脉冲标记使用 `AnimationController` 实现呼吸灯效果
+
+### 获取 MBTiles
+
+推荐使用以下工具下载离线地图瓦片：
+- **Mobile Atlas Creator (MOBAC)**：支持多种地图源，导出 MBTiles 格式
+- **TileMill + mbutil**：自定义样式后导出
+
+---
+
+## 🎨 声呐雷达可视化
+
+### 文件
+
+[lib/widgets/sonar_radar_widget.dart](lib/widgets/sonar_radar_widget.dart)
+
+### 性能特性
+
+- **60fps 流畅动画**：使用 `CustomPainter` 直接绘制
+- **局部刷新**：仅雷达区域重绘，不影响父组件
+- **淡入动画**：新设备出现时有平滑的 FadeIn 过渡
+- **脉冲效果**：每个设备光点带有呼吸灯效果
+
+### 视觉效果
 
 - 中心绿色同心圆代表自身位置
 - 往外扩散的绿色扫描波纹（Ripple Effect）
 - 红色闪烁光点代表求救者，大小和亮度根据 RSSI 动态调整
-- 深色径向渐变背景，营造科技感和沉浸感
+- 深色径向渐变背景
 
-**使用示例：**
+### 使用示例
 
 ```dart
 // 完整雷达（推荐用于独立页面）
 SonarRadarWidget(size: 320)
 
-// 迷你雷达（用于仪表盘概览）
-MiniSonarRadarWidget(size: 160)
-```
-
-**集成到现有页面：**
-
-```dart
 // 在 mesh_dashboard_page.dart 中
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'widgets/SonarRadarWidget.dart';
-
-class MeshDashboardPage extends ConsumerWidget {
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Scaffold(
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            // 声呐雷达
-            SonarRadarWidget(size: 360),
-            
-            SizedBox(height: 24),
-            
-            // 设备统计
-            Consumer(
-              builder: (context, ref, _) {
-                final meshState = ref.watch(meshStateProvider);
-                return Text(
-                  '发现 ${meshState.activeDevices.length} 个活跃设备',
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                );
-              },
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-```
-
-**高级定制：**
-
-如需自定义雷达样式，可继承 `ConsumerStatefulWidget`并传入自定义参数：
-
-```dart
-SonarRadarWidget(
-  size: 400,  // 自定义尺寸
+Consumer(
+  builder: (context, ref, _) {
+    final meshState = ref.watch(meshStateProvider);
+    return SonarRadarWidget(size: 360);
+  },
 )
 ```
 
-颜色主题可通过修改 `RescuePalette`进行调整。
-**演示页面：**
-
-可以参考 [`radar_demo_page.dart`](lib/radar_demo_page.dart) 完整示例，该页面展示了：
-- 如何集成 SonarRadarWidget
-- 如何显示设备统计信息
-- 如何列出设备详情（MAC、距离、RSSI、血型）
-
 ---
 
-### 快速上手步骤
+## 🔋 省电与后台服务
 
-1. **在 `main.dart` 中初始化 Riverpod**
+### 极限求生模式
 
-```dart
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+通过 [lib/widgets/ultra_power_switch_widget.dart](lib/widgets/ultra_power_switch_widget.dart) 提供一键切换。
 
-void main() {
-  runApp(
-    ProviderScope(  // 添加这个包装
-      child: MyApp(),
-    ),
-  );
-}
-```
+**进入极限模式后的变化：**
+| 资源 | 标准模式 | 极限模式 | 效果 |
+|------|---------|---------|------|
+| GPS | 高精度持续监听 | 单次定位，5分钟间隔 | 大幅降低功耗 |
+| BLE 广播 | 1 秒间隔 | 5 秒间隔 | 降低射频功耗 |
+| 屏幕亮度 | 正常 | 5% | 屏幕是最耗电组件 |
+| AI 引擎 | 运行 | 关闭 | 释放 CPU |
 
-2. **在 BLE 扫描服务中注入 Riverpod 容器引用**
+### 前台后台服务
 
-```dart
-class BleScannerService extends ChangeNotifier {
-  Ref? ref;  // 添加这个属性
-  
-  void _handleScanResults(List<ScanResult> results) {
-    for (final result in results) {
-      final payload = _parseAdvertisement(result.advertisementData.manufacturerData);
-      if (payload != null && ref != null) {
-        // 添加到 Riverpod 状态
-        ref!.read(meshStateProvider.notifier).addOrUpdateDevice(
-          result.device.remoteId.toString(),
-          payload,
-          result.rssi,
-        );
-      }
-    }
-  }
-}
-```
+通过 [lib/services/background_service_manager.dart](lib/services/background_service_manager.dart) 管理。
 
-3. **在页面中使用雷达组件**
-
-```dart
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'widgets/SonarRadarWidget.dart';
-
-class MeshDashboardPage extends ConsumerWidget {
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return Scaffold(
-      body: Center(
-        child: SonarRadarWidget(size: 360),
-      ),
-    );
-  }
-}
-```
----
-
-### 与 BLE 扫描服务集成
-
-在 `ble_scanner_service.dart` 中将扫描结果同步到 Riverpod：
-
-```dart
-void _handleScanResults(List<ScanResult> results) {
-  for (final result in results) {
-    if (result.advertisementData.manufacturerData != null) {
-      // 解析 SOS 载荷
-      final payload = _parseAdvertisement(result.advertisementData.manufacturerData);
-      if (payload != null) {
-        // 添加到 Riverpod 状态
-        meshStateNotifier.addOrUpdateDevice(
-          result.device.remoteId.toString(),
-          payload,
-          result.rssi,
-        );
-      }
-    }
-  }
-}
-```
-
----
-
-### 最佳实践
-
-1. **避免在 build 方法中调用 `ref.read()`**: 使用`ref.watch()` 让 Riverpod 自动管理生命周期
-2. **精细粒度监听**: 只监听需要的状态字段，避免大范围重建
-3. **定期清理过期数据**: 调用 `notifier.removeStaleDevices(60)` 清理超过 60 秒未更新的设备
-4. **测试不同密度场景**: 确保在 50+ 设备同时出现时仍保持流畅
+**关键设计：**
+- 使用 `flutter_background_service` 确保后台不被系统杀死
+- 常驻通知栏通知告知用户服务正在运行
+- 通过静态字段在 Isolate 间共享数据（因为后台服务运行在独立 Isolate）
 
 ---
 
@@ -561,123 +604,14 @@ void _handleScanResults(List<ScanResult> results) {
 
 - [ ] 后端控制台无报错，MongoDB 已连接
 - [ ] 大屏左上角显示绿色"已连接"状态
-- [ ] 手机 App 能正常启动，四个 Tab 可切换
+- [ ] 手机 App 能正常启动，各 Tab 可切换
 - [ ] 在手机 SOS 页触发广播，另一台手机能扫描到信号
-- [ ] 手机网络恢复后，大屏自动出现新的 SOS 告警卡片和地图红点
-- [ ] **雷达页面能正确显示周围设备，光点位置和 RSSI 匹配**
-- [ ] **快速移动设备时，雷达动画保持 60fps 无卡顿**
-
----
-
-### 🖥️ 前端大屏优化 (dashboard/)
-
-**1. ECharts 图表动画增强**
-
-文件：[dashboard/src/components/StatsComponent.vue](dashboard/src/components/StatsComponent.vue)
-
-当前状态：图表已实现，但数据更新时缺少流畅过渡动画。
-
-任务：
-- 为玫瑰图设置 `animationType: 'scale'`，`animationDuration: 800`
-- 折线图新增数据点时使用 `chart.appendData()` 而非全量 `setOption()`，避免闪烁
-- 当 `alerts` 为空时显示"等待数据接入..."的空状态占位
-
-**2. Leaflet 地图红点 Ripple 动效优化**
-
-文件：[dashboard/src/components/MapComponent.vue](dashboard/src/components/MapComponent.vue)、[dashboard/src/style.css](dashboard/src/style.css)
-
-当前状态：脉冲动画类 `.sos-marker / .sos-dot / .sos-ring` 已在 CSS 中定义。
-
-任务：
-- 新增告警时，对应标记播放一次"爆闪"入场动画（scale 0→1.5→1）
-- 超过 30 分钟的旧告警标记降低不透明度（0.4），颜色从红色渐变为橙色
-- 点击标记弹出 Popup 显示：MAC后四位 / 血型 / 时间 / 中继次数(confidence)
-
-**3. 断线重连 UI 提示**
-
-文件：[dashboard/src/App.vue](dashboard/src/App.vue)、[dashboard/src/composables/useSocket.js](dashboard/src/composables/useSocket.js)
-
-任务：
-- 在 `useSocket.js` 中监听 `socket.on('disconnect')` 和 `socket.on('reconnect_attempt')`
-- 在顶部状态栏显示"连接中断，正在重连 (3)..."倒计时 UI
-- 重连成功后自动调用 `fetchActive()` 补齐断线期间的数据
-
----
-
-### ⚙️ 后端逻辑优化 (server/)
-
-**1. 精准去重算法完善**
-
-文件：[server/src/routes/sos.js](server/src/routes/sos.js)
-
-当前状态：基于 `senderMac + timestamp` 10分钟窗口去重。
-
-任务：
-- 增加坐标漂移容忍：同一 MAC 在 10 分钟内、GPS 坐标偏差 < 100 米范围内，视为同一事件
-- 合并时更新 `location` 为多次上报的坐标**加权平均值**，提升定位精度（更多骡子 → 更准确）
-- 完善 `details[]` 返回字段，包含每条记录的处理结果
-
-**2. MongoDB 空间查询加速**
-
-文件：[server/src/models/SosRecord.js](server/src/models/SosRecord.js)
-
-当前状态：已建立 `2dsphere` 索引，但未在查询中使用 `$near` 进行范围搜索。
-
-任务：
-- 在 `GET /api/sos/active` 中增加可选的地理围栏参数：`?lat=&lon=&radius=5000`（单位：米）
-- 使用 `$geoWithin` / `$centerSphere` 实现响应端查询指挥中心关注区域内的告警
-
-**3. 数据老化与状态流转**
-
-任务：
-- 增加定时任务（`setInterval` 或 `node-cron`）：每 5 分钟将超过 2 小时无新上报的 `active` SOS 标记为 `stale`
-- 为 `GET /api/sos/active` 增加分页参数 `?page=&limit=`，防止大屏初始化时数据量过大
-
----
-//我来就行可以不用管
-
-### 📱 移动端 UI/UX 优化 (lib/)
-
-**1. 医疗档案页 Apple Health 极简风美化**
-
-文件：[lib/medical_profile_page.dart](lib/medical_profile_page.dart)
-
-任务：
-- 参考 Apple Health 风格：卡片圆角 `16px`，白底+浅灰分割线，SF Pro 风字重
-- 血型选择改为色块 RadioButton 组：A(红)/B(青)/AB(黄)/O(蓝)，选中后边框高亮+勾选图标
-- 页面顶部增加一个"一键生成 SOS 二维码"按钮，将档案编码为 QR 供离线扫描
-
-**2. BLE 扫描电量消耗优化**
-
-文件：[lib/services/ble_scanner_service.dart](lib/services/ble_scanner_service.dart)
-
-当前状态：使用低延迟扫描模式（`lowLatency`）。
-
-任务：
-- 前台活跃时使用 `lowLatency`，后台/息屏时切换为 `lowPower` 模式
-- 监听 `AppLifecycleState`，在 `paused` 状态下降低扫描频率
-- 扫描间隔增加**指数退避**：连续 5 分钟无新信号时，扫描间隔从 5s 逐步拉大到 30s
-
-**3. 错误弹窗与状态反馈完善**
-
-涉及文件：[lib/sos_page.dart](lib/sos_page.dart)、[lib/services/network_sync_service.dart](lib/services/network_sync_service.dart)
-
-任务：
-- SOS 触发失败（蓝牙未开启、定位被拒）时，弹出 `AlertDialog` 说明原因并引导用户去设置页
-- 网络同步结果用 `SnackBar` 展示："已上传 12 条 SOS 记录 ✓" 或 "同步失败，将在下次联网时重试"
-- `MeshDashboardPage` 中实时显示：当前广播状态 / 本地待上传记录数 / 最近一次同步时间
-
----
-
-## 🔩 已知问题与 TODO
-
-| # | 问题 | 位置 | 优先级 |
-|---|------|------|--------|
-| 1 | Flutter BloodType 枚举值与 MongoDB 存储值存在偏移 | `network_sync_service.dart` + `SosRecord.js` | 🔴 高 |
-| 2 | 端侧 AI (`fcllama`/`llama_cpp_dart`) 依赖已声明但未实际接入 | `ai_chat_page.dart` | 🟡 中 |
-| 3 | `network_sync_service.dart` 中后端地址硬编码为生产域名 | `lib/services/network_sync_service.dart` | 🔴 高（联调必改）|
-| 4 | Android BLE 广播 Method Channel 实现在原生层，需补充说明 | `android/` | 🟡 中 |
-| 5 | 大屏初始化时若 SOS 记录过多，无分页导致首屏卡顿 | `GET /api/sos/active` | 🟡 中 |
+- [ ] 手机网络恢复后，大屏自动出现新的 SOS 告警
+- [ ] 雷达页面能正确显示周围设备，光点位置和 RSSI 匹配
+- [ ] 快速移动设备时，雷达动画保持 60fps 无卡顿
+- [ ] 离线地图能正常加载 MBTiles 瓦片
+- [ ] 极限求生模式切换后，GPS/BLE/亮度策略正确生效
+- [ ] 前台服务通知栏常驻显示，后台广播持续运行
 
 ---
 
@@ -691,12 +625,51 @@ void _handleScanResults(List<ScanResult> results) {
 
 Socket 事件名：new_sos_alert
 API 前缀：/api/sos/
+BLE Company ID：0xFFFF
+BLE 载荷长度：14 字节 (v1 协议)
+
+Drift 代码生成：
+  dart run build_runner build        # 一次性生成
+  dart run build_runner watch        # 监听模式
 
 Git 分支建议：
   main        → 稳定版本，只接受 PR 合并
   feat/xxx    → 新功能开发
   fix/xxx     → Bug 修复
 ```
+
+---
+
+## 🔩 已知问题与 TODO
+
+| # | 问题 | 位置 | 优先级 |
+|---|------|------|--------|
+| 1 | Flutter BloodType 枚举值与 MongoDB 存储值存在偏移 | `network_sync_service.dart` | 🔴 高 |
+| 2 | `network_sync_service.dart` 中后端地址硬编码 | `lib/services/network_sync_service.dart` | 🟡 中 |
+| 3 | 大屏初始化时 SOS 记录过多无分页 | `GET /api/sos/active` | 🟡 中 |
+| 4 | AR 救援罗盘页面待完善 | `lib/ar_rescue_compass_page.dart` | 🟢 低 |
+| 5 | 医疗档案页 UI 待美化 | `lib/medical_profile_page.dart` | 🟡 中 |
+
+---
+
+## 📚 相关文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [README.md](README.md) | 项目概述与快速开始 |
+| [BLE_RELAY_QUEUE_GUIDE.md](BLE_RELAY_QUEUE_GUIDE.md) | BLE 中继队列机制详解 |
+| [FOREGROUND_SERVICE_GUIDE.md](FOREGROUND_SERVICE_GUIDE.md) | 前台后台服务生命周期管理 |
+| [MAPTILES_SETUP_GUIDE.md](MAPTILES_SETUP_GUIDE.md) | 离线地图瓦片配置 |
+| [OFFLINE_MAP_QUICKSTART.md](OFFLINE_MAP_QUICKSTART.md) | 离线地图快速入门 |
+| [OFFLINE_MAP_INTEGRATION.md](OFFLINE_MAP_INTEGRATION.md) | 离线地图集成指南 |
+| [OFFLINE_MAP_CHECKLIST.md](OFFLINE_MAP_CHECKLIST.md) | 离线地图检查清单 |
+| [SOS_DISPATCH_GUIDE.md](SOS_DISPATCH_GUIDE.md) | SOS 调度中心详解 |
+| [SERVER_DEPLOYMENT_GUIDE.md](SERVER_DEPLOYMENT_GUIDE.md) | 服务器部署指南 |
+| [USER_DATA_PERSISTENCE_GUIDE.md](USER_DATA_PERSISTENCE_GUIDE.md) | 用户数据持久化指南 |
+| [AR_RESCUE_COMPASS_GUIDE.md](AR_RESCUE_COMPASS_GUIDE.md) | AR 救援罗盘指南 |
+| [AR_PERMISSIONS_CONFIG.md](AR_PERMISSIONS_CONFIG.md) | AR 权限配置 |
+| [AR_ENTERPRISE_FEATURES.md](AR_ENTERPRISE_FEATURES.md) | AR 企业级功能 |
+| [RELAY_API_REFERENCE.md](RELAY_API_REFERENCE.md) | 中继 API 参考 |
 
 ---
 
