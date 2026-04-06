@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../config/app_config.dart';
 import '../database.dart';
 import 'network_sync_exceptions.dart';
 
@@ -32,8 +33,7 @@ class NetworkSyncService extends ChangeNotifier {
        _connectivity = connectivity ?? Connectivity(),
        _httpClient = httpClient ?? http.Client(),
        _ownsHttpClient = httpClient == null,
-       _endpoint =
-           endpoint ?? Uri.parse('http://101.35.52.133:3000/api/sos/sync'),
+       _endpoint = endpoint ?? AppConfig.sosSyncEndpoint,
        _requestTimeout = requestTimeout ?? const Duration(seconds: 12),
        _muleId = muleId,
        _connectivityStreamProvider = connectivityStreamProvider,
@@ -106,7 +106,9 @@ class NetworkSyncService extends ChangeNotifier {
 
   Future<int> syncNow() async {
     if (_isSyncing) {
-      debugPrint('[NetworkSync] Sync already running, skipping duplicate call.');
+      debugPrint(
+        '[NetworkSync] Sync already running, skipping duplicate call.',
+      );
       return 0;
     }
 
@@ -139,13 +141,15 @@ class NetworkSyncService extends ChangeNotifier {
 
       final medicalProfile = await _getMedicalProfileJson();
       final firstMessageId = pendingMessages.first.id;
-      final uploadData = pendingMessages.map((message) {
-        final data = _mapMessageToJson(message, deviceId);
-        if (message.id == firstMessageId && medicalProfile.isNotEmpty) {
-          data['medicalProfile'] = medicalProfile;
-        }
-        return data;
-      }).toList(growable: false);
+      final uploadData = pendingMessages
+          .map((message) {
+            final data = _mapMessageToJson(message, deviceId);
+            if (message.id == firstMessageId && medicalProfile.isNotEmpty) {
+              data['medicalProfile'] = medicalProfile;
+            }
+            return data;
+          })
+          .toList(growable: false);
 
       final requestBody = <String, Object?>{
         'muleId': _muleId ?? deviceId,

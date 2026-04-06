@@ -38,6 +38,12 @@ class SosMessages extends Table {
   IntColumn get bloodType => integer()();
   DateTimeColumn get timestamp => dateTime()();
   BoolColumn get isUploaded => boolean().withDefault(const Constant(false))();
+
+  @override
+  List<Set<Column>> get indices => [
+    {isUploaded}, // 加速 getPendingUploads() 查询
+    {senderMac, timestamp}, // 加速 saveIncomingSos() 去重查询
+  ];
 }
 
 class StoredSosMessage {
@@ -71,7 +77,7 @@ class AppDatabase extends _$AppDatabase {
       StreamController<List<StoredSosMessage>>.broadcast();
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -85,6 +91,20 @@ class AppDatabase extends _$AppDatabase {
       }
       if (from < 3) {
         await m.create(medicalProfiles);
+      }
+      if (from < 4) {
+        await m.createIndex(
+          Index(
+            'idx_sos_messages_is_uploaded',
+            'CREATE INDEX IF NOT EXISTS idx_sos_messages_is_uploaded ON $_sosMessagesTableName (is_uploaded)',
+          ),
+        );
+        await m.createIndex(
+          Index(
+            'idx_sos_messages_sender_mac_timestamp',
+            'CREATE INDEX IF NOT EXISTS idx_sos_messages_sender_mac_timestamp ON $_sosMessagesTableName (sender_mac, timestamp)',
+          ),
+        );
       }
     },
     beforeOpen: (details) async {

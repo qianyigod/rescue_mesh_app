@@ -43,6 +43,7 @@ router.post('/sync', async (req, res) => {
         socketService.broadcastNewSos(result.doc);
       } else {
         merged += 1;
+        socketService.broadcastNewSos(result.doc);
       }
 
       details.push({
@@ -176,20 +177,25 @@ async function upsertSosRecord(record, muleId, medicalProfile = {}) {
   if (existingRecord) {
     const update = {
       $addToSet: { reportedBy: muleId },
+      $set: {
+        location: record.location,
+        bloodType: record.bloodType,
+        timestamp: record.timestamp,
+        status: 'active',
+      },
     };
 
     if (Object.keys(medicalProfile).length > 0) {
-      update.$set = { medicalProfile };
+      update.$set.medicalProfile = medicalProfile;
     }
 
-    await SosRecord.updateOne({ _id: existingRecord._id }, update);
-    existingRecord.reportedBy = [...new Set([...existingRecord.reportedBy, muleId])];
+    const updatedRecord = await SosRecord.findByIdAndUpdate(
+      existingRecord._id,
+      update,
+      { new: true },
+    );
 
-    if (Object.keys(medicalProfile).length > 0) {
-      existingRecord.medicalProfile = medicalProfile;
-    }
-
-    return { action: 'merged', doc: existingRecord };
+    return { action: 'merged', doc: updatedRecord ?? existingRecord };
   }
 
   const createdRecord = await SosRecord.create({

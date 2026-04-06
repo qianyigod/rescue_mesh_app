@@ -234,7 +234,19 @@ flutter devices
 flutter run -d <device_id>
 ```
 
-**修改后端同步地址：** 打开 [lib/services/network_sync_service.dart](lib/services/network_sync_service.dart)，将 `_endpoint` 改为 `http://<YOUR_LAN_IP>:3000/api/sos/sync`。
+**选择运行环境：**
+```bash
+# 本地开发（Android 模拟器连接宿主机）
+flutter run --dart-define=ENV=local
+
+# 云服务器（连接远程服务器）
+flutter run --dart-define=ENV=production
+
+# 真机调试（连接局域网内的电脑）
+flutter run --dart-define=API_BASE_URL=http://<YOUR_LAN_IP>:3000
+```
+
+> ~~**修改后端同步地址：** 打开 [lib/services/network_sync_service.dart](lib/services/network_sync_service.dart)，将 `_endpoint` 改为 `http://<YOUR_LAN_IP>:3000/api/sos/sync`。~~ （已废弃，改用 `--dart-define` 参数）
 
 **重新生成 Drift 代码（若修改了 database.dart）：**
 ```bash
@@ -615,6 +627,173 @@ Consumer(
 
 ---
 
+## � 代码审查与改进建议
+
+> **最后审查日期：** 2026-04-06
+> **审查范围：** 全量代码库（lib/、server/、dashboard/）
+
+---
+
+### 🔴 严重问题（阻塞上线）
+
+#### 1. ~~BLE 协议长度不一致~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- `BleScannerService._expectedPayloadLength` 已从 `10` 改为 `14`
+- `decodeSosPayload()` 的字节偏移已与 `BlePayloadEncoder` 完全对齐：
+  - offset 0: 协议版本 (uint8)
+  - offset 1: 血型编码 (uint8)
+  - offset 2-5: 纬度 (float32 LE)
+  - offset 6-9: 经度 (float32 LE)
+  - offset 10-13: 时间戳 (uint32 LE)
+- 移除了旧的 `_decodeCoordinate` 双重解析逻辑（float32 + int32/1000000 fallback），改为直接读取 float32
+
+#### ~~2. 后端地址硬编码且多处不一致~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- 新增统一配置 [lib/config/app_config.dart](lib/config/app_config.dart)，通过 `--dart-define=ENV=xxx` 切换环境
+- `network_sync_service.dart` 和 `sos_dispatch_manager.dart` 均已迁移到 `AppConfig`
+- 不再需要手动修改源码中的 IP 地址
+
+**使用方式：**
+```bash
+# 本地开发（连接本机模拟器）
+flutter run --dart-define=ENV=local
+
+# 云服务器（连接 101.35.52.133:3000）
+flutter run --dart-define=ENV=production
+
+# 自定义 IP（覆盖默认值）
+flutter run --dart-define=ENV=local --dart-define=API_BASE_URL=http://192.168.1.100:3000
+```
+
+> ⚠️ **Android 模拟器注意：** 模拟器访问宿主机需用 `10.0.2.2` 而非 `localhost`。`ENV=local` 默认已配置为 `10.0.2.2:3000`。真机调试请使用 `--dart-define=API_BASE_URL=http://<你的局域网IP>:3000`。
+
+#### ~~3. 服务生命周期管理不完整~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- [main.dart](lib/main.dart) 的 `dispose()` 中补充了服务清理逻辑
+- 退出时会停止 BLE 扫描、BLE 广播、网络同步监听
+
+#### ~~4. SOS 调度职责重叠~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- 已删除 `sos_dispatch_manager.dart`（无任何实际调用，仅有注释示例）
+- `SosTriggerService` 作为唯一 SOS 触发入口，已被 `sos_page.dart` 和 `mesh_dashboard_page.dart` 使用
+- `SosTriggerService` 的设计更清晰：数据库写入 → BLE 广播 → 网络同步，各通道错误独立报告
+
+#### ~~5. `SosDispatchManager._sendHttpRequest` 缺少重试机制~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- `SosDispatchManager` 已删除，此问题随之消除
+- `SosTriggerService` 通过 `NetworkSyncService.syncNow()` 执行同步，后者会在网络恢复时自动重试
+
+#### ~~6. `main.dart` 中服务初始化缺乏顺序保障~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- 使用 `Future.wait` 并行等待所有服务初始化完成后再进入主界面
+- 新增 `_safeInitialize` 辅助方法，捕获并记录每个服务的初始化错误，而非直接吞掉
+- 初始化期间显示加载界面（"正在初始化救援系统..."），错误时显示具体失败信息
+- SOS 消息流订阅仅在全部服务初始化成功后才注册，避免在 BLE 未就绪时触发异常
+- 错误日志通过 `debugPrint` 输出，便于调试
+
+**核心改动：**
+```dart
+// 并行初始化，等待全部完成
+final results = await Future.wait([
+  _safeInitialize('PowerSavingManager', () => powerSavingManager.initialize()),
+  _safeInitialize('BleMeshService', () => bleMeshService.init()),
+  _safeInitialize('BleScannerService', () => bleScannerService.init()),
+  _safeInitialize('NetworkSyncService', () => networkSyncService.startListening()),
+]);
+
+// 收集错误并显示
+for (final result in results) {
+  if (result != null) errors.add(result);
+}
+```
+
+#### ~~7. Drift 数据库缺少索引优化~~ — ✅ 已修复 (2026-04-06)
+
+**修复内容：**
+- 在 `SosMessages` 表中添加了两个索引：
+  - `{isUploaded}` — 加速 `getPendingUploads()` 查询，避免全表扫描
+  - `{senderMac, timestamp}` — 加速 `saveIncomingSos()` 去重查询
+- 数据库 schema 版本从 3 升级到 4
+- 迁移策略中为已有数据库通过 `m.createIndex()` 创建索引
+- 新安装数据库会在建表时自动创建索引
+
+**核心改动：**
+```dart
+@override
+List<Set<Column>> get indices => [
+  {isUploaded},              // 加速 getPendingUploads() 查询
+  {senderMac, timestamp},    // 加速 saveIncomingSos() 去重查询
+];
+```
+
+#### 8. 后台服务跨 Isolate 数据共享不安全
+
+**问题描述：** `BackgroundServiceManager` 使用静态字段在 Isolate 间共享位置/血型数据。由于 Dart Isolate 是内存隔离的，静态字段在不同 Isolate 中是独立的副本，不是共享的。
+
+**影响：** 后台 Isolate 可能使用过期的位置数据广播 SOS。
+
+**建议：** 使用 `SendPort`/`ReceivePort` 或 `flutter_background_service` 提供的 `invoke_service_method` 进行跨 Isolate 通信。
+
+---
+
+### 🟢 改进建议（提升质量）
+
+#### 9. 血型编码映射在同步时存在歧义
+
+**问题描述：**
+- Flutter `BloodType` 枚举：`unknown(-1), a(0), b(1), ab(2), o(3)`
+- BLE 协议：血型作为 uint8（0-255），但 `unknown` 的 `-1` 会被截断为 255
+- 后端 MongoDB 存储的值与前端枚举可能不对齐
+
+**建议：** 在 `network_sync_service.dart` 中添加显式的血型转换函数，并在文档中明确定义编码映射。
+
+#### 10. 缺少统一的日志框架
+
+**问题描述：** 各处使用 `debugPrint` 输出日志，发布模式下会被丢弃。生产环境无法追踪问题。
+
+**建议：** 引入 `logger` 包，或使用 `drift` 自带的日志机制。至少在生产模式下将关键事件写入本地文件。
+
+#### 11. `ble_scanner_service.dart` 中去重指纹策略可优化
+
+**问题描述：** 当前使用 MAC 地址 + 坐标构建 fingerprint。但 BLE 设备可能随机化 MAC 地址，导致同一设备被识别为多个节点。
+
+**建议：** 考虑使用载荷内容的哈希作为去重标识（如 `senderMac + lat + lon + timestamp` 的 MD5），而非依赖 MAC 地址。
+
+#### 12. 缺少单元测试覆盖
+
+**问题描述：** `test/` 目录下的测试文件较少，核心服务（`BleMeshService`、`SosTriggerService`、`SosDispatchManager`）缺少测试。
+
+**建议优先测试：**
+- `BlePayloadEncoder` 的编解码往返一致性（当前因 #1 的 Bug 必定失败）
+- `NetworkSyncService` 的网络异常场景（超时、断网、服务端 500）
+- 数据库去重逻辑的正确性
+
+#### 13. `pubspec.yaml` 依赖版本约束过宽
+
+**问题描述：** 部分依赖使用 `^x.y.z` 宽松约束，可能导致不同开发者拉取到不同版本的依赖。
+
+**建议：** 在 `pubspec_overrides.yaml` 中锁定关键依赖的版本，或使用 `flutter pub deps` 定期检查依赖树。
+
+#### 14. 大屏仪表盘缺少 SOS 历史分页
+
+**问题描述：** `GET /api/sos/active` 返回所有活跃 SOS 记录，无分页。当记录超过 1000 条时，前端渲染会卡顿。
+
+**建议：** 后端添加 `?page=&limit=` 参数支持分页查询。
+
+#### 15. 错误处理策略过于激进地吞掉异常
+
+**问题描述：** `main.dart` 中多处 `.catchError((_) => null)` 会掩盖真实的初始化失败原因，导致应用看似正常运行但核心功能失效。
+
+**建议：** 至少记录错误日志：`.catchError((e) => debugPrint('[Init Error] $e'))`，或在 UI 上显示降级提示。
+
+---
+
 ## 📐 开发规范速记
 
 ```
@@ -627,6 +806,7 @@ Socket 事件名：new_sos_alert
 API 前缀：/api/sos/
 BLE Company ID：0xFFFF
 BLE 载荷长度：14 字节 (v1 协议)
+环境切换：flutter run --dart-define=ENV=[local|production]
 
 Drift 代码生成：
   dart run build_runner build        # 一次性生成
@@ -644,11 +824,22 @@ Git 分支建议：
 
 | # | 问题 | 位置 | 优先级 |
 |---|------|------|--------|
-| 1 | Flutter BloodType 枚举值与 MongoDB 存储值存在偏移 | `network_sync_service.dart` | 🔴 高 |
-| 2 | `network_sync_service.dart` 中后端地址硬编码 | `lib/services/network_sync_service.dart` | 🟡 中 |
-| 3 | 大屏初始化时 SOS 记录过多无分页 | `GET /api/sos/active` | 🟡 中 |
-| 4 | AR 救援罗盘页面待完善 | `lib/ar_rescue_compass_page.dart` | 🟢 低 |
-| 5 | 医疗档案页 UI 待美化 | `lib/medical_profile_page.dart` | 🟡 中 |
+| 1 | ~~**BLE 协议长度不一致**~~ encoder 14 字节 vs scanner 10 字节 — ✅ 已修复 (2026-04-06) | `ble_scanner_service.dart` | ✅ 已修复 |
+| 2 | ~~**后端地址硬编码**~~ 已通过 AppConfig 统一配置 — ✅ 已修复 (2026-04-06) | `config/app_config.dart` | ✅ 已修复 |
+| 3 | ~~**服务 dispose 不完整**~~ 已补充清理逻辑 — ✅ 已修复 (2026-04-06) | `main.dart` | ✅ 已修复 |
+| 4 | ~~**SOS 调度职责重叠**~~ 已删除 SosDispatchManager — ✅ 已修复 (2026-04-06) | `sos_trigger_service.dart` | ✅ 已修复 |
+| 5 | ~~**HTTP 同步无重试**~~ 随 SosDispatchManager 一并消除 — ✅ 已修复 (2026-04-06) | — | ✅ 已修复 |
+| 6 | ~~**服务初始化无顺序保障**~~ 已使用 Future.wait 等待 — ✅ 已修复 (2026-04-06) | `main.dart` | ✅ 已修复 |
+| 7 | ~~**Drift 数据库缺少索引**~~ 已添加 isUploaded 和复合索引 — ✅ 已修复 (2026-04-06) | `database.dart` | ✅ 已修复 |
+| 8 | 跨 Isolate 静态字段不共享 | `background_service_manager.dart` | 🟡 中 |
+| 9 | 血型编码映射歧义 | `emergency_profile.dart` + BLE 协议 | 🟡 中 |
+| 10 | 缺少统一日志框架 | 全局 | 🟢 低 |
+| 11 | BLE MAC 随机化影响去重 | `ble_scanner_service.dart` | 🟢 低 |
+| 12 | 单元测试覆盖率不足 | `test/` | 🟡 中 |
+| 13 | 大屏 SOS 列表无分页 | `GET /api/sos/active` | 🟡 中 |
+| 14 | 错误处理过度吞异常 | `main.dart` | 🟡 中 |
+| 15 | AR 救援罗盘页面待完善 | `lib/ar_rescue_compass_page.dart` | 🟢 低 |
+| 16 | 医疗档案页 UI 待美化 | `lib/medical_profile_page.dart` | 🟡 中 |
 
 ---
 

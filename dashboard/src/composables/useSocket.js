@@ -82,6 +82,14 @@ function normalizeAlert(raw) {
   }
 }
 
+function resolveBloodType(alert) {
+  const detail = alert?.medicalProfile?.bloodTypeDetail
+  if (detail !== undefined && detail !== null && detail !== -1) {
+    return String(detail)
+  }
+  return String(alert?.bloodType ?? -1)
+}
+
 function recomputeMetrics() {
   activeCount.value = alerts.value.length
 
@@ -95,7 +103,7 @@ function recomputeMetrics() {
   medicalStats.historyCount = 0
 
   for (const alert of alerts.value) {
-    const bloodType = String(alert.bloodType ?? -1)
+    const bloodType = resolveBloodType(alert)
     bloodCounts[bloodType] = (bloodCounts[bloodType] || 0) + 1
 
     const diffHours = Math.floor(

@@ -20,7 +20,7 @@ class BleScannerService extends ChangeNotifier {
   }
 
   static const int rescueCompanyId = 0xFFFF;
-  static const int _expectedPayloadLength = 10;
+  static const int _expectedPayloadLength = 14;
   static const Duration _duplicateSuppressionWindow = Duration(seconds: 30);
 
   final StreamController<models.SosMessage> _sosMessageController =
@@ -117,16 +117,17 @@ class BleScannerService extends ChangeNotifier {
     }
 
     final byteData = ByteData.sublistView(Uint8List.fromList(payload));
-    final sosFlag = byteData.getUint8(0) != 0;
-    final latitude = _decodeCoordinate(byteData, 1, isLatitude: true);
-    final longitude = _decodeCoordinate(byteData, 5, isLatitude: false);
-    final bloodTypeCode = byteData.getInt8(9);
+    final protocolVersion = byteData.getUint8(0);
+    final bloodTypeCode = byteData.getUint8(1);
+    final latitude = byteData.getFloat32(2, Endian.little);
+    final longitude = byteData.getFloat32(6, Endian.little);
+    // offset 10-13: timestamp (uint32 LE) — 暂不存入 SosMessage
 
     return models.SosMessage(
       companyId: companyId,
       remoteId: remoteId,
       deviceName: deviceName,
-      sosFlag: sosFlag,
+      sosFlag: protocolVersion != 0,
       latitude: latitude,
       longitude: longitude,
       bloodTypeCode: bloodTypeCode,
@@ -274,27 +275,7 @@ class BleScannerService extends ChangeNotifier {
     _setException(exception);
   }
 
-  double _decodeCoordinate(
-    ByteData byteData,
-    int offset, {
-    required bool isLatitude,
-  }) {
-    final floatValue = byteData.getFloat32(offset, Endian.little);
-    if (_isCoordinateInRange(floatValue, isLatitude: isLatitude)) {
-      return floatValue;
-    }
-
-    final scaledValue = byteData.getInt32(offset, Endian.little) / 1000000.0;
-    if (_isCoordinateInRange(scaledValue, isLatitude: isLatitude)) {
-      return scaledValue;
-    }
-
-    throw BleMeshInvalidPayloadException(
-      isLatitude ? '扫描到的纬度数据无效。' : '扫描到的经度数据无效。',
-    );
-  }
-
-  bool _isCoordinateInRange(double value, {required bool isLatitude}) {
+  bool _isCoordinateValid(double value, {required bool isLatitude}) {
     if (!value.isFinite) {
       return false;
     }
