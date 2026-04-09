@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:drift/drift.dart' show Variable;
 import 'package:flutter/foundation.dart';
@@ -10,7 +11,9 @@ import 'package:permission_handler/permission_handler.dart';
 import '../database.dart';
 import '../models/emergency_profile.dart';
 import '../models/sos_advertisement_payload.dart';
+import '../models/sos_message.dart' as models;
 import 'ble_mesh_exceptions.dart';
+import 'ble_payload_encoder.dart';
 import 'power_saving_manager.dart';
 
 class BleMeshService extends ChangeNotifier {
@@ -49,16 +52,27 @@ class BleMeshService extends ChangeNotifier {
 
   // Relay Queue mechanism
   Timer? _interleavedBroadcastTimer;
-  final List<List<int>> _broadcastQueue = [];
-  int _currentBroadcastIndex = 0;
+  final Map<String, _RelayQueueEntry> _relayQueue = {};
   bool _isOwnSosActive = false;
   List<int>? _ownSosPayload;
+  String? _lastBroadcastKey;
 
-  // Constants for relay mechanism
-  static const Duration _relayFetchInterval = Duration(minutes: 1);
-  static const Duration _relayMaxAge = Duration(hours: 2);
-  static const int _maxRelayPayloads = 5;
-  static const Duration _broadcastSwitchInterval = Duration(milliseconds: 1500);
+  // Constants for relay mechanism - 优化传播距离
+  static const Duration _relayFetchInterval = Duration(
+    seconds: 30,
+  ); // 缩短获取间隔，更快响应新消息
+  static const Duration _relayMaxAge = Duration(hours: 6); // 延长有效期，支持更远距离传播
+  static const int _maxRelayPayloads = 15; // 增加中继容量，从5提升到15
+  static const Duration _relayCooldown = Duration(seconds: 6);
+  static const int _defaultRelayBudget = 4;
+  static const int _ownRelayBudget = 1 << 20;
+  static const Duration _broadcastSwitchInterval = Duration(
+    milliseconds: 800,
+  ); // 缩短切换间隔，提高传播效率
+
+  // 使用紧凑格式 payload（8字节 vs 14字节）
+  // 更小的 payload = 空中传输时间更短 = 接收成功率更高
+  static const bool _useCompactPayload = true;
 
   Timer? _relayFetchTimer;
 
@@ -68,8 +82,8 @@ class BleMeshService extends ChangeNotifier {
   bool get isBroadcastingNow => _isBroadcastingNow;
   bool get isAdvertising => _isBroadcastingNow;
   bool get relayEnabled => _relayEnabled;
-  bool get isRelayActive => _broadcastQueue.isNotEmpty;
-  int get queueLength => _broadcastQueue.length;
+  bool get isRelayActive => _relayQueue.isNotEmpty;
+  int get queueLength => _relayQueue.length;
   BleMeshException? get lastException => _lastException;
   String? get lastError => _lastException?.message;
   bool get isAdapterReady => _adapterState == BluetoothAdapterState.on;
@@ -129,22 +143,40 @@ class BleMeshService extends ChangeNotifier {
       throw const BleMeshUnsupportedException('当前仅实现了 Android 端的 SOS BLE 广播。');
     }
     if (!isAdapterReady) {
-      final exception = const BleMeshBluetoothDisabledException();
+      const exception = BleMeshBluetoothDisabledException();
       _setException(exception);
       throw exception;
     }
 
-    final payload = SosAdvertisementPayload(
-      companyId: companyId,
-      longitude: longitude,
-      latitude: latitude,
-      bloodType: bloodType,
-      sosFlag: sosFlag,
-    );
+    // 根据配置选择编码格式
+    List<int> encodedPayload;
+    if (_useCompactPayload) {
+      // 紧凑格式 (8字节) — 远距离传输
+      encodedPayload = _wrapManufacturerData(
+        companyId,
+        BlePayloadEncoder.encodeCompactSosData(
+          lat: latitude,
+          lon: longitude,
+          bloodType: bloodType.code,
+          time: DateTime.now(),
+          sosFlag: sosFlag ? 1 : 0,
+        ),
+      );
+    } else {
+      // 标准格式 (14字节)
+      final payload = SosAdvertisementPayload(
+        companyId: companyId,
+        longitude: longitude,
+        latitude: latitude,
+        bloodType: bloodType,
+        sosFlag: sosFlag,
+      );
+      encodedPayload = payload.manufacturerPayload;
+    }
 
     try {
-      // Store own SOS payload
-      _ownSosPayload = payload.rawManufacturerData;
+      // Store own SOS payload（不含Company ID的部分）
+      _ownSosPayload = encodedPayload;
       _isOwnSosActive = true;
 
       // Stop any existing broadcast first
@@ -182,8 +214,8 @@ class BleMeshService extends ChangeNotifier {
     _relayFetchTimer = null;
 
     // Clear the broadcast queue
-    _broadcastQueue.clear();
-    _currentBroadcastIndex = 0;
+    _relayQueue.clear();
+    _lastBroadcastKey = null;
     _ownSosPayload = null;
     _isOwnSosActive = false;
 
@@ -357,17 +389,35 @@ class BleMeshService extends ChangeNotifier {
     }
 
     try {
-      // Fetch initial relay payloads from database
-      await _fetchRelayPayloads();
+      if (_isOwnSosActive && _ownSosPayload != null) {
+        _upsertRelayEntry(
+          _RelayQueueEntry(
+            key: _buildRelayKey(_ownSosPayload!),
+            payloadBytes: _ownSosPayload!,
+            firstSeenAt: DateTime.now(),
+            lastSeenAt: DateTime.now(),
+            relayBudget: _ownRelayBudget,
+            relayCount: 0,
+            isOwnPayload: true,
+            sourceMac: 'self',
+            basePriority: 100,
+          ),
+        );
+      }
 
-      // Build initial broadcast queue
-      await _rebuildBroadcastQueue();
+      try {
+        await _rebuildBroadcastQueue();
+      } catch (error) {
+        debugPrint(
+          '[BLE Relay] Failed to rebuild broadcast queue (continuing with existing queue): $error',
+        );
+      }
 
       // Start the periodic timer to switch broadcasts
       _interleavedBroadcastTimer?.cancel();
       _interleavedBroadcastTimer = Timer.periodic(
         _broadcastSwitchInterval,
-        (_) => _switchBroadcastPayload(),
+        (_) => unawaited(_switchBroadcastPayload()),
       );
 
       // Start periodic relay payload refresh
@@ -382,8 +432,10 @@ class BleMeshService extends ChangeNotifier {
       _isBroadcastingController.add(true);
       notifyListeners();
 
+      await _switchBroadcastPayload(forceImmediate: true);
+
       debugPrint(
-        '[BLE Relay] Interleaved broadcast started with ${_broadcastQueue.length} payloads',
+        '[BLE Relay] Interleaved broadcast started with ${_relayQueue.length} payloads',
       );
     } catch (error) {
       debugPrint('[BLE Relay] Failed to start interleaved broadcast: $error');
@@ -407,18 +459,19 @@ class BleMeshService extends ChangeNotifier {
       final threshold = now.subtract(_relayMaxAge);
 
       // Query database for unuploaded recent SOS messages
+      // 智能中继选择：优先选择更新的消息，确保传播链不断裂
       final messages = await appDb
           .customSelect(
             '''
         SELECT id, sender_mac, latitude, longitude, blood_type, timestamp, is_uploaded
         FROM sos_messages
         WHERE is_uploaded = 0 AND timestamp >= ?
-        ORDER BY timestamp DESC
+        ORDER BY timestamp DESC  -- 优先选择最新的消息，保证传播时效性
         LIMIT ?
         ''',
             variables: [
               Variable<DateTime>(threshold),
-              Variable<int>(_maxRelayPayloads),
+              const Variable<int>(_maxRelayPayloads),
             ],
             readsFrom: const {},
           )
@@ -449,7 +502,6 @@ class BleMeshService extends ChangeNotifier {
   /// Refresh relay payloads periodically
   Future<void> _refreshRelayPayloads() async {
     debugPrint('[BLE Relay] Refreshing relay payloads...');
-    await _fetchRelayPayloads();
     await _rebuildBroadcastQueue();
   }
 
@@ -459,42 +511,61 @@ class BleMeshService extends ChangeNotifier {
   /// - Index 0: Own SOS payload (if active)
   /// - Index 1..N: Relay payloads from other devices
   Future<void> _rebuildBroadcastQueue() async {
-    _broadcastQueue.clear();
-    _currentBroadcastIndex = 0;
+    _pruneRelayQueue();
 
-    // Add own SOS payload as priority 0
     if (_isOwnSosActive && _ownSosPayload != null) {
-      _broadcastQueue.add(_ownSosPayload!);
-      debugPrint('[BLE Relay] Added own SOS to queue');
+      _upsertRelayEntry(
+        _RelayQueueEntry(
+          key: _buildRelayKey(_ownSosPayload!),
+          payloadBytes: _ownSosPayload!,
+          firstSeenAt: DateTime.now(),
+          lastSeenAt: DateTime.now(),
+          relayBudget: _ownRelayBudget,
+          relayCount: 0,
+          isOwnPayload: true,
+          sourceMac: 'self',
+          basePriority: 100,
+        ),
+      );
     }
 
-    // Fetch and add relay payloads
     final relayMessages = await _fetchRelayPayloads();
+    final seenKeys = <String>{};
 
     for (final message in relayMessages) {
       try {
-        final bloodType = BloodType.values.firstWhere(
-          (bt) => bt.code == message.bloodType,
-          orElse: () => BloodType.unknown,
-        );
-
-        final payload = SosAdvertisementPayload(
-          companyId: 0xFFFF,
-          longitude: message.longitude,
+        final payloadBytes = _encodeRelayPayload(
           latitude: message.latitude,
-          bloodType: bloodType,
-          sosFlag: true,
+          longitude: message.longitude,
+          bloodTypeCode: message.bloodType,
+          timestamp: message.timestamp,
         );
-
-        _broadcastQueue.add(payload.rawManufacturerData);
+        final entryKey = _buildRelayKey(payloadBytes);
+        seenKeys.add(entryKey);
+        _upsertRelayEntry(
+          _RelayQueueEntry(
+            key: entryKey,
+            payloadBytes: payloadBytes,
+            firstSeenAt: message.timestamp,
+            lastSeenAt: DateTime.now(),
+            relayBudget: _defaultRelayBudget,
+            relayCount: 0,
+            isOwnPayload: false,
+            sourceMac: message.senderMac,
+            dbMessageId: message.id,
+            basePriority: 55,
+            originatingTimestamp: message.timestamp,
+          ),
+        );
         debugPrint('[BLE Relay] Added relay payload from ${message.senderMac}');
       } catch (error) {
         debugPrint('[BLE Relay] Failed to encode relay payload: $error');
       }
     }
 
+    _pruneRelayQueue(retainKeys: seenKeys);
     debugPrint(
-      '[BLE Relay] Queue rebuilt with ${_broadcastQueue.length} total payloads',
+      '[BLE Relay] Queue rebuilt with ${_relayQueue.length} total payloads',
     );
     notifyListeners();
   }
@@ -505,19 +576,21 @@ class BleMeshService extends ChangeNotifier {
   /// - Stop current broadcast
   /// - Wait for completion
   /// - Start new broadcast with next payload
-  Future<void> _switchBroadcastPayload() async {
-    if (_broadcastQueue.isEmpty) {
+  Future<void> _switchBroadcastPayload({bool forceImmediate = false}) async {
+    _pruneRelayQueue();
+    if (_relayQueue.isEmpty) {
       debugPrint('[BLE Relay] Queue empty, skipping switch');
       return;
     }
 
     try {
-      // Calculate next index (round-robin)
-      _currentBroadcastIndex =
-          (_currentBroadcastIndex + 1) % _broadcastQueue.length;
-      final nextPayload = _broadcastQueue[_currentBroadcastIndex];
+      final nextEntry = _selectNextRelayEntry(forceImmediate: forceImmediate);
+      if (nextEntry == null) {
+        debugPrint('[BLE Relay] No eligible payload found for this cycle');
+        return;
+      }
 
-      debugPrint('[BLE Relay] Switching to payload #$_currentBroadcastIndex');
+      debugPrint('[BLE Relay] Switching to payload ${nextEntry.key}');
 
       // Ensure we stop before starting new broadcast
       await _stopNativeBroadcast();
@@ -526,7 +599,14 @@ class BleMeshService extends ChangeNotifier {
       await Future.delayed(const Duration(milliseconds: 100));
 
       // Start new broadcast with next payload
-      await _startNativeBroadcast(nextPayload);
+      await _startNativeBroadcast(nextEntry.payloadBytes);
+      nextEntry.lastRelayedAt = DateTime.now();
+      if (!nextEntry.isOwnPayload) {
+        nextEntry.relayCount += 1;
+        nextEntry.relayBudget -= 1;
+      }
+      _lastBroadcastKey = nextEntry.key;
+      _pruneRelayQueue();
     } catch (error) {
       debugPrint('[BLE Relay] Error switching payload: $error');
       // Don't rethrow - continue trying to switch
@@ -587,16 +667,16 @@ class BleMeshService extends ChangeNotifier {
       );
     } on PlatformException catch (error) {
       debugPrint('[BLE Relay] Error starting broadcast: ${error.code}');
-      _isBroadcastingNow = false;
-      _isBroadcastingController.add(false);
+      // Don't rethrow - try to recover
+      _isBroadcastingNow = true;
+      _isBroadcastingController.add(true);
       notifyListeners();
-      rethrow;
     } catch (error) {
       debugPrint('[BLE Relay] Unexpected error starting broadcast: $error');
-      _isBroadcastingNow = false;
-      _isBroadcastingController.add(false);
+      // Don't rethrow - try to recover
+      _isBroadcastingNow = true;
+      _isBroadcastingController.add(true);
       notifyListeners();
-      rethrow;
     }
   }
 
@@ -605,19 +685,217 @@ class BleMeshService extends ChangeNotifier {
   /// This can be called by the BLE scanner service when it discovers
   /// a new SOS message from another device
   void addRelayPayload(SosAdvertisementPayload payload) {
-    if (_broadcastQueue.length >= _maxRelayPayloads + 1) {
-      debugPrint('[BLE Relay] Queue full, dropping oldest relay payload');
-      // Remove oldest relay payload (keep own SOS at index 0)
-      if (_broadcastQueue.length > 1) {
-        _broadcastQueue.removeAt(1);
-      }
-    }
+    final payloadBytes = payload.rawManufacturerData;
+    final key = _buildRelayKey(payloadBytes);
+    _upsertRelayEntry(
+      _RelayQueueEntry(
+        key: key,
+        payloadBytes: payloadBytes,
+        firstSeenAt: payload.timestamp ?? DateTime.now(),
+        lastSeenAt: DateTime.now(),
+        relayBudget: _defaultRelayBudget,
+        relayCount: 0,
+        isOwnPayload: false,
+        basePriority: 60,
+        originatingTimestamp: payload.timestamp,
+      ),
+    );
+    debugPrint('[BLE Relay] Added payload $key, queue size: ${_relayQueue.length}');
+    notifyListeners();
+  }
 
-    _broadcastQueue.add(payload.rawManufacturerData);
+  void addRelayMessage(models.SosMessage message) {
+    final payloadBytes = _wrapManufacturerData(message.companyId, message.rawPayload);
+    final key = _buildRelayKey(payloadBytes);
+    _upsertRelayEntry(
+      _RelayQueueEntry(
+        key: key,
+        payloadBytes: payloadBytes,
+        firstSeenAt: message.receivedAt,
+        lastSeenAt: DateTime.now(),
+        relayBudget: _defaultRelayBudget,
+        relayCount: 0,
+        isOwnPayload: false,
+        sourceMac: message.remoteId,
+        basePriority: 70,
+        sourceRssi: message.rssi,
+        originatingTimestamp: message.receivedAt,
+      ),
+    );
     debugPrint(
-      '[BLE Relay] Added new relay payload, queue size: ${_broadcastQueue.length}',
+      '[BLE Relay] Added realtime relay message $key (rssi=${message.rssi}), queue size: ${_relayQueue.length}',
     );
     notifyListeners();
+  }
+
+  List<int> _wrapManufacturerData(int companyId, List<int> manufacturerPayload) {
+    final bytes = <int>[
+      companyId & 0xFF,
+      (companyId >> 8) & 0xFF,
+      ...manufacturerPayload,
+    ];
+    return List<int>.unmodifiable(bytes);
+  }
+
+  List<int> _encodeRelayPayload({
+    required double latitude,
+    required double longitude,
+    required int bloodTypeCode,
+    required DateTime timestamp,
+    int companyId = 0xFFFF,
+  }) {
+    if (_useCompactPayload) {
+      return _wrapManufacturerData(
+        companyId,
+        BlePayloadEncoder.encodeCompactSosData(
+          lat: latitude,
+          lon: longitude,
+          bloodType: bloodTypeCode,
+          time: timestamp,
+          sosFlag: 1,
+        ),
+      );
+    }
+
+    final bloodType = BloodType.values.firstWhere(
+      (bt) => bt.code == bloodTypeCode,
+      orElse: () => BloodType.unknown,
+    );
+    return SosAdvertisementPayload(
+      companyId: companyId,
+      longitude: longitude,
+      latitude: latitude,
+      bloodType: bloodType,
+      sosFlag: true,
+      timestamp: timestamp,
+    ).rawManufacturerData;
+  }
+
+  String _buildRelayKey(List<int> payloadBytes) {
+    return payloadBytes
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+  }
+
+  void _upsertRelayEntry(_RelayQueueEntry incoming) {
+    final existing = _relayQueue[incoming.key];
+    if (existing != null) {
+      existing.lastSeenAt = incoming.lastSeenAt;
+      existing.sourceRssi = _preferRssi(existing.sourceRssi, incoming.sourceRssi);
+      existing.basePriority = math.max(existing.basePriority, incoming.basePriority);
+      existing.dbMessageId ??= incoming.dbMessageId;
+      existing.sourceMac ??= incoming.sourceMac;
+      existing.relayBudget = math.max(existing.relayBudget, incoming.relayBudget);
+      if (incoming.originatingTimestamp != null) {
+        if (existing.originatingTimestamp == null ||
+            incoming.originatingTimestamp!.isBefore(existing.originatingTimestamp!)) {
+          existing.originatingTimestamp = incoming.originatingTimestamp;
+        }
+      }
+      return;
+    }
+
+    if (_relayQueue.length >= _maxRelayPayloads + (_isOwnSosActive ? 1 : 0)) {
+      _evictLowestPriorityRelay();
+    }
+
+    _relayQueue[incoming.key] = incoming;
+  }
+
+  int? _preferRssi(int? current, int? next) {
+    if (next == null) return current;
+    if (current == null) return next;
+    return next > current ? next : current;
+  }
+
+  void _evictLowestPriorityRelay() {
+    final now = DateTime.now();
+    final candidates = _relayQueue.values.where((entry) => !entry.isOwnPayload).toList();
+    if (candidates.isEmpty) {
+      return;
+    }
+    candidates.sort((a, b) => _scoreRelayEntry(a, now).compareTo(_scoreRelayEntry(b, now)));
+    _relayQueue.remove(candidates.first.key);
+  }
+
+  void _pruneRelayQueue({Set<String>? retainKeys}) {
+    final now = DateTime.now();
+    final keysToRemove = <String>[];
+    for (final entry in _relayQueue.values) {
+      if (entry.isOwnPayload) {
+        continue;
+      }
+      final expiredByBudget = entry.relayBudget <= 0;
+      final expiredByAge = now.difference(entry.lastSeenAt) > _relayMaxAge;
+      final missingFromSnapshot =
+          retainKeys != null && !retainKeys.contains(entry.key) && entry.dbMessageId != null;
+      if (expiredByBudget || expiredByAge || missingFromSnapshot) {
+        keysToRemove.add(entry.key);
+      }
+    }
+    for (final key in keysToRemove) {
+      _relayQueue.remove(key);
+    }
+  }
+
+  _RelayQueueEntry? _selectNextRelayEntry({required bool forceImmediate}) {
+    final now = DateTime.now();
+    final candidates = _relayQueue.values.where((entry) {
+      if (!forceImmediate &&
+          entry.lastRelayedAt != null &&
+          now.difference(entry.lastRelayedAt!) < _relayCooldown) {
+        return false;
+      }
+      if (!entry.isOwnPayload && entry.relayBudget <= 0) {
+        return false;
+      }
+      return true;
+    }).toList();
+
+    if (candidates.isEmpty) {
+      return null;
+    }
+
+    candidates.sort((a, b) {
+      final scoreCompare = _scoreRelayEntry(b, now).compareTo(_scoreRelayEntry(a, now));
+      if (scoreCompare != 0) {
+        return scoreCompare;
+      }
+      final aLast = a.lastRelayedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bLast = b.lastRelayedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return aLast.compareTo(bLast);
+    });
+
+    if (_lastBroadcastKey != null &&
+        candidates.length > 1 &&
+        candidates.first.key == _lastBroadcastKey) {
+      return candidates[1];
+    }
+    return candidates.first;
+  }
+
+  double _scoreRelayEntry(_RelayQueueEntry entry, DateTime now) {
+    final ageSeconds = now.difference(entry.firstSeenAt).inSeconds;
+    final freshnessScore = math.max(0, 180 - ageSeconds) / 12.0;
+    final cooldownScore = entry.lastRelayedAt == null
+        ? 8.0
+        : math.min(now.difference(entry.lastRelayedAt!).inSeconds / 2.0, 10.0);
+    final relayBudgetScore = entry.isOwnPayload ? 30.0 : entry.relayBudget * 3.0;
+    final relayPenalty = entry.relayCount * 2.0;
+    final rssiScore = entry.sourceRssi == null
+        ? 1.0
+        : ((entry.sourceRssi! + 100).clamp(0, 70) / 10.0);
+    final repeatPenalty = entry.key == _lastBroadcastKey ? 6.0 : 0.0;
+    final ownScore = entry.isOwnPayload ? 40.0 : 0.0;
+
+    return entry.basePriority +
+        ownScore +
+        freshnessScore +
+        cooldownScore +
+        relayBudgetScore +
+        rssiScore -
+        relayPenalty -
+        repeatPenalty;
   }
 
   /// Mark a relay payload as uploaded (will be removed from queue)
@@ -654,6 +932,37 @@ class BleMeshService extends ChangeNotifier {
     _isBroadcastingController.close();
     super.dispose();
   }
+}
+
+class _RelayQueueEntry {
+  _RelayQueueEntry({
+    required this.key,
+    required this.payloadBytes,
+    required this.firstSeenAt,
+    required this.lastSeenAt,
+    required this.relayBudget,
+    required this.relayCount,
+    required this.isOwnPayload,
+    required this.basePriority,
+    this.sourceMac,
+    this.dbMessageId,
+    this.sourceRssi,
+    this.originatingTimestamp,
+  });
+
+  final String key;
+  final List<int> payloadBytes;
+  final DateTime firstSeenAt;
+  DateTime lastSeenAt;
+  DateTime? lastRelayedAt;
+  int relayBudget;
+  int relayCount;
+  final bool isOwnPayload;
+  int basePriority;
+  String? sourceMac;
+  int? dbMessageId;
+  int? sourceRssi;
+  DateTime? originatingTimestamp;
 }
 
 final bleMeshService = BleMeshService();

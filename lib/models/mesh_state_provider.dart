@@ -1,9 +1,8 @@
-import 'dart:math' as math;
-
 import 'package:flutter/foundation.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../models/sos_payload.dart';
+import '../services/rssi_ranging_engine.dart';
 
 part 'mesh_state_provider.g.dart';
 
@@ -16,6 +15,7 @@ class DiscoveredDevice {
     required this.rssi,
     required this.firstDiscoveredAt,
     required this.lastUpdatedAt,
+    this.rangingResult,
   });
 
   final String macAddress;
@@ -24,23 +24,20 @@ class DiscoveredDevice {
   final DateTime firstDiscoveredAt;
   final DateTime lastUpdatedAt;
 
-  /// 根据 RSSI 估算距离（米），仅供参考
-  /// RSSI 越接近 0 表示信号越强，通常在 -100 到 -20 之间
-  double get estimatedDistance {
-    const int txPower = -59; // 假设发射功率为 -59dBm
-    final rssiDouble = rssi.toDouble();
+  /// RSSI 测距结果（含卡尔曼滤波和置信度）
+  final RangingResult? rangingResult;
 
-    if (rssiDouble == 0) {
-      return double.infinity;
-    }
+  /// 估算距离（米）— 使用统一测距引擎
+  double get estimatedDistance => rangingResult?.estimatedDistance ?? 0;
 
-    final ratio = rssiDouble / txPower;
-    if (ratio < 1.0) {
-      return math.pow(ratio, 10).toDouble();
-    } else {
-      return (0.89976 * math.pow(ratio, 7.7095) + 0.111);
-    }
-  }
+  /// 距离置信度（0.0 - 1.0）
+  double get distanceConfidence => rangingResult?.confidence ?? 0;
+
+  /// 置信度标签
+  String get confidenceLabel => rangingResult?.confidenceLabel ?? '未知';
+
+  /// 距离描述
+  String get distanceDescription => rangingResult?.distanceDescription ?? '未知';
 
   DiscoveredDevice copyWith({
     String? macAddress,
@@ -48,6 +45,7 @@ class DiscoveredDevice {
     int? rssi,
     DateTime? firstDiscoveredAt,
     DateTime? lastUpdatedAt,
+    RangingResult? rangingResult,
   }) {
     return DiscoveredDevice(
       macAddress: macAddress ?? this.macAddress,
@@ -55,6 +53,7 @@ class DiscoveredDevice {
       rssi: rssi ?? this.rssi,
       firstDiscoveredAt: firstDiscoveredAt ?? this.firstDiscoveredAt,
       lastUpdatedAt: lastUpdatedAt ?? this.lastUpdatedAt,
+      rangingResult: rangingResult ?? this.rangingResult,
     );
   }
 
@@ -138,11 +137,16 @@ class MeshStateNotifier extends _$MeshStateNotifier {
   /// 核心优化逻辑：
   /// 1. 通过 MAC 地址去重
   /// 2. 只有当设备是新的，或者时间戳/信号强度有显著变化时才更新
-  /// 3. 避免无效的频繁重绘
+  /// 3. 使用统一 RSSI 测距引擎（含卡尔曼滤波）
+  /// 4. 避免无效的频繁重绘
   void addOrUpdateDevice(String macAddress, SosPayload payload, int rssi) {
     final now = DateTime.now();
     final currentState = state;
     final existingDevice = currentState.discoveredDevices[macAddress];
+
+    // 使用统一测距引擎计算距离
+    final rangingEngine = RssiRangingEngine.instance();
+    final rangingResult = rangingEngine.estimateDistance(rssi);
 
     // 如果设备已存在，检查是否需要更新
     if (existingDevice != null) {
@@ -161,6 +165,7 @@ class MeshStateNotifier extends _$MeshStateNotifier {
         payload: payload,
         rssi: rssi,
         lastUpdatedAt: now,
+        rangingResult: rangingResult,
       );
 
       state = currentState.copyWith(
@@ -178,6 +183,7 @@ class MeshStateNotifier extends _$MeshStateNotifier {
         rssi: rssi,
         firstDiscoveredAt: now,
         lastUpdatedAt: now,
+        rangingResult: rangingResult,
       );
 
       state = currentState.copyWith(
@@ -193,6 +199,69 @@ class MeshStateNotifier extends _$MeshStateNotifier {
   /// 清除所有发现的设备
   void clearDevices() {
     state = state.copyWith(discoveredDevices: {}, lastScanTime: DateTime.now());
+  }
+
+  /// 注入测试数据（用于开发调试）
+  void injectTestData() {
+    final now = DateTime.now();
+    // 以深圳某地为测试中心点
+    const centerLat = 22.547;
+    const centerLng = 114.065;
+
+    final testData = [
+      // 设备1：强信号，近距离
+      (
+        mac: 'AA:BB:CC:00:00:01',
+        payload: SosPayload(
+          protocolVersion: 1,
+          bloodType: 1, // A型血
+          latitude: centerLat + 0.001,
+          longitude: centerLng + 0.001,
+          timestamp: now.millisecondsSinceEpoch ~/ 1000,
+        ),
+        rssi: -45,
+      ),
+      // 设备2：中等信号
+      (
+        mac: 'AA:BB:CC:00:00:02',
+        payload: SosPayload(
+          protocolVersion: 1,
+          bloodType: 2, // B型血
+          latitude: centerLat - 0.002,
+          longitude: centerLng + 0.003,
+          timestamp: now.millisecondsSinceEpoch ~/ 1000 - 10,
+        ),
+        rssi: -65,
+      ),
+      // 设备3：弱信号，远距离
+      (
+        mac: 'AA:BB:CC:00:00:03',
+        payload: SosPayload(
+          protocolVersion: 1,
+          bloodType: 3, // AB型血
+          latitude: centerLat + 0.005,
+          longitude: centerLng - 0.004,
+          timestamp: now.millisecondsSinceEpoch ~/ 1000 - 20,
+        ),
+        rssi: -85,
+      ),
+      // 设备4：O型血，中等距离
+      (
+        mac: 'AA:BB:CC:00:00:04',
+        payload: SosPayload(
+          protocolVersion: 1,
+          bloodType: 0, // O型血
+          latitude: centerLat - 0.003,
+          longitude: centerLng - 0.002,
+          timestamp: now.millisecondsSinceEpoch ~/ 1000 - 5,
+        ),
+        rssi: -70,
+      ),
+    ];
+
+    for (final data in testData) {
+      addOrUpdateDevice(data.mac, data.payload, data.rssi);
+    }
   }
 
   /// 设置扫描状态

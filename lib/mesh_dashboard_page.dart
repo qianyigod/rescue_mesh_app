@@ -10,6 +10,7 @@ import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
 import 'services/sos_trigger_service.dart';
+import 'services/rssi_ranging_engine.dart';
 import 'theme/rescue_theme.dart';
 import 'widgets/offline_tactical_map_view.dart';
 
@@ -18,11 +19,13 @@ class MeshDashboardPage extends StatefulWidget {
     super.key,
     BleMeshService? sosService,
     BleScannerService? scannerService,
+    this.onRadarRequested,
   }) : sosService = sosService ?? bleMeshService,
        scannerService = scannerService ?? bleScannerService;
 
   final BleMeshService sosService;
   final BleScannerService scannerService;
+  final Future<void> Function()? onRadarRequested;
 
   @override
   State<MeshDashboardPage> createState() => _MeshDashboardPageState();
@@ -102,8 +105,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
           _actionStatus =
               'SOS 已广播并成功上传到指挥中心。纬度 ${result.latitude.toStringAsFixed(5)}，经度 ${result.longitude.toStringAsFixed(5)}。';
         } else if (result.uploadedToCommandCenter && result.bleError != null) {
-          _actionStatus =
-              'SOS 已上传到指挥中心，但本地 BLE 广播失败：${result.bleError}';
+          _actionStatus = 'SOS 已上传到指挥中心，但本地 BLE 广播失败：${result.bleError}';
         } else if (result.syncError != null && result.broadcastStarted) {
           _actionStatus =
               'SOS 已广播，但联网上传失败：${result.syncError}。数据已保存，恢复联网后会自动重试。';
@@ -123,6 +125,19 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
   }
 
   Future<void> _toggleRadarScanning() async {
+    if (widget.onRadarRequested != null) {
+      await widget.onRadarRequested!.call();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _actionStatus = widget.scannerService.isScanning
+            ? '雷达页已打开，扫描正在运行。'
+            : '已切换到雷达页，请检查蓝牙与权限状态。';
+      });
+      return;
+    }
+
     if (widget.scannerService.isScanning) {
       try {
         await widget.scannerService.stopScanning();
@@ -151,14 +166,20 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
     }
   }
 
-  void _openArRescueCompass() {
+  void _openArRescueCompass({
+    double? targetLatitude,
+    double? targetLongitude,
+    String? targetName,
+    int? targetRssi,
+  }) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => const ArRescueCompassPage(
-          targetLatitude: 0.0,
-          targetLongitude: 0.0,
-          targetName: 'AR 导航',
+        builder: (context) => ArRescueCompassPage(
+          targetLatitude: targetLatitude ?? 0.0,
+          targetLongitude: targetLongitude ?? 0.0,
+          targetName: targetName ?? 'AR 导航',
+          targetRssi: targetRssi ?? -70,
         ),
       ),
     );
@@ -176,15 +197,11 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
     );
   }
 
-  double _estimateDistanceMeters(int rssi) {
-    const txPower = -59.0;
-    const pathLoss = 2.2;
-    final ratio = (txPower - rssi) / (10 * pathLoss);
-    return math.pow(10, ratio).toDouble();
-  }
-
   String _formatDistance(int rssi) {
-    final meters = _estimateDistanceMeters(rssi);
+    final rangingEngine = RssiRangingEngine.instance();
+    final result = rangingEngine.estimateDistance(rssi);
+    final meters = result.estimatedDistance;
+
     if (!meters.isFinite || meters <= 0) {
       return '距离未知';
     }
@@ -308,61 +325,206 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                   stream: _sosStream,
                   builder: (context, snapshot) {
                     return Container(
-                      padding: const EdgeInsets.all(18),
+                      padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        color: RescuePalette.panel,
+                        gradient: const LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [Color(0xFFFFFFFF), Color(0xFFF8FAFC)],
+                        ),
                         borderRadius: BorderRadius.circular(28),
                         border: Border.all(
                           color: snapshot.hasData
-                              ? RescuePalette.critical
+                              ? RescuePalette.critical.withValues(alpha: 0.3)
                               : RescuePalette.border,
                         ),
                         boxShadow: const [
                           BoxShadow(
-                            color: Color(0x12000000),
-                            blurRadius: 16,
-                            offset: Offset(0, 6),
+                            color: Color(0x0A000000),
+                            blurRadius: 20,
+                            offset: Offset(0, 4),
                           ),
                         ],
                       ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          // 标题栏
                           Row(
                             children: [
-                              Expanded(
-                                child: Text(
-                                  '雷达监测区',
-                                  style: Theme.of(context).textTheme.titleMedium
-                                      ?.copyWith(
-                                        fontWeight: FontWeight.w900,
-                                        letterSpacing: 0.8,
+                              // 标题
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: snapshot.hasData
+                                        ? const [
+                                            Color(0xFFFF6B6B),
+                                            Color(0xFFEE5A5A),
+                                          ]
+                                        : const [
+                                            Color(0xFF2DD4A0),
+                                            Color(0xFF20B88A),
+                                          ],
+                                  ),
+                                  borderRadius: BorderRadius.circular(10),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color:
+                                          (snapshot.hasData
+                                                  ? RescuePalette.critical
+                                                  : RescuePalette.success)
+                                              .withValues(alpha: 0.3),
+                                      blurRadius: 8,
+                                      offset: const Offset(0, 2),
+                                    ),
+                                  ],
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      _isMapView
+                                          ? Icons.map_outlined
+                                          : Icons.radar,
+                                      size: 16,
+                                      color: Colors.white,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      _isMapView ? '战术地图' : '雷达监测',
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w700,
+                                        letterSpacing: 0.5,
                                       ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                              // [新增] 视图切换按钮
-                              IconButton(
-                                icon: Icon(
-                                  _isMapView ? Icons.radar : Icons.map,
-                                  color: _isMapView
-                                      ? RescuePalette.accent
-                                      : RescuePalette.success,
+                              const Spacer(),
+                              // 视图切换按钮
+                              Container(
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF1F5F9),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: const Color(0xFFE2E8F0),
+                                    width: 1,
+                                  ),
                                 ),
-                                tooltip: _isMapView ? '切换到雷达模式' : '切换到地图模式',
-                                onPressed: () {
-                                  setState(() {
-                                    _isMapView = !_isMapView;
-                                  });
-                                },
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    // 雷达模式按钮
+                                    GestureDetector(
+                                      onTap: () {
+                                        if (_isMapView) {
+                                          setState(() {
+                                            _isMapView = false;
+                                          });
+                                        }
+                                      },
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 8,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: !_isMapView
+                                              ? Colors.white
+                                              : Colors.transparent,
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                          boxShadow: !_isMapView
+                                              ? [
+                                                  BoxShadow(
+                                                    color: Colors.black
+                                                        .withValues(
+                                                          alpha: 0.08,
+                                                        ),
+                                                    blurRadius: 4,
+                                                    offset: const Offset(0, 1),
+                                                  ),
+                                                ]
+                                              : null,
+                                        ),
+                                        child: Icon(
+                                          Icons.radar,
+                                          size: 18,
+                                          color: !_isMapView
+                                              ? RescuePalette.success
+                                              : const Color(0xFF94A3B8),
+                                        ),
+                                      ),
+                                    ),
+                                    // 地图模式按钮
+                                    GestureDetector(
+                                      onTap: () {
+                                        if (!_isMapView) {
+                                          setState(() {
+                                            _isMapView = true;
+                                          });
+                                        }
+                                      },
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 8,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: _isMapView
+                                              ? Colors.white
+                                              : Colors.transparent,
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                          boxShadow: _isMapView
+                                              ? [
+                                                  BoxShadow(
+                                                    color: Colors.black
+                                                        .withValues(
+                                                          alpha: 0.08,
+                                                        ),
+                                                    blurRadius: 4,
+                                                    offset: const Offset(0, 1),
+                                                  ),
+                                                ]
+                                              : null,
+                                        ),
+                                        child: Icon(
+                                          Icons.map_outlined,
+                                          size: 18,
+                                          color: _isMapView
+                                              ? RescuePalette.accent
+                                              : const Color(0xFF94A3B8),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ],
                           ),
-                          const SizedBox(height: 14),
+                          const SizedBox(height: 16),
                           if (_isMapView)
                             // [新增] 地图模式
-                            const SizedBox(
+                            Container(
                               height: 280,
-                              child: OfflineTacticalMapView(),
+                              decoration: BoxDecoration(
+                                borderRadius: BorderRadius.circular(16),
+                                border: Border.all(
+                                  color: const Color(0xFFE2E8F0),
+                                  width: 1,
+                                ),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: const OfflineTacticalMapView(),
                             )
                           else
                             // [原有] 雷达模式
@@ -531,93 +693,123 @@ class _RadarSilentPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       children: [
-        SizedBox(
-          height: 280,
-          child: AnimatedBuilder(
-            animation: controller,
-            builder: (context, _) {
-              final progress = controller.value;
-              return Stack(
-                alignment: Alignment.center,
-                children: [
-                  for (final base in [0.2, 0.45, 0.7])
-                    Transform.scale(
-                      scale: 0.6 + ((progress + base) % 1.0) * 0.9,
-                      child: Opacity(
-                        opacity: 0.10 + (1 - ((progress + base) % 1.0)) * 0.18,
-                        child: Container(
-                          width: 180,
-                          height: 180,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border: Border.all(
-                              color: RescuePalette.success.withValues(
-                                alpha: 0.32,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  Container(
-                    width: 220,
-                    height: 220,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: const Color(0xFFF6FBF8),
-                      border: Border.all(color: RescuePalette.border),
-                    ),
-                  ),
-                  Transform.rotate(
-                    angle: progress * math.pi * 2,
-                    child: Container(
-                      width: 220,
-                      height: 220,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        gradient: SweepGradient(
-                          colors: [
-                            RescuePalette.success.withValues(alpha: 0.0),
-                            RescuePalette.success.withValues(alpha: 0.0),
-                            RescuePalette.success.withValues(alpha: 0.12),
-                            RescuePalette.success.withValues(alpha: 0.42),
-                          ],
-                          stops: const [0.0, 0.55, 0.82, 1.0],
-                        ),
-                      ),
-                    ),
-                  ),
-                  Container(
-                    width: 16,
-                    height: 16,
-                    decoration: const BoxDecoration(
-                      color: RescuePalette.success,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ],
-              );
-            },
-          ),
-        ),
-        Text(
-          isScanning ? '雷达静默，周边安全' : '雷达待机，点击下方按钮开始扫描',
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-            color: isScanning ? RescuePalette.success : RescuePalette.textMuted,
-            fontWeight: FontWeight.w900,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Text(
-          isScanning ? '正在扫描周边区域，等待求救信号...' : '扫描启动后，这里会实时显示附近的求救卡片',
-          textAlign: TextAlign.center,
-          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-            color: RescuePalette.textMuted,
-            height: 1.45,
-          ),
+        // 雷达容器 - 精致声纳扫描屏幕
+        AnimatedBuilder(
+          animation: controller,
+          builder: (context, _) {
+            return CustomPaint(
+              size: const Size(220, 220),
+              painter: _SonarRadarPainter(
+                sweepAngle: controller.value * math.pi * 2,
+                isScanning: isScanning,
+              ),
+            );
+          },
         ),
       ],
     );
+  }
+}
+
+/// 简约风格雷达绘制器
+class _SonarRadarPainter extends CustomPainter {
+  _SonarRadarPainter({required this.sweepAngle, required this.isScanning});
+
+  final double sweepAngle;
+  final bool isScanning;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final cx = size.width / 2;
+    final cy = size.height / 2;
+    final radius = math.min(cx, cy) - 4;
+
+    final linePaint = Paint()
+      ..color = const Color(0xFF9CA3AF).withValues(alpha: 0.3)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.8;
+
+    // 外圈
+    canvas.drawCircle(
+      Offset(cx, cy),
+      radius,
+      Paint()
+        ..color = const Color(0xFF9CA3AF).withValues(alpha: 0.4)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
+    );
+
+    // 同心圆
+    for (int i = 1; i <= 3; i++) {
+      final r = radius * i / 3;
+      canvas.drawCircle(Offset(cx, cy), r, linePaint);
+    }
+
+    // 十字线
+    canvas.drawLine(
+      Offset(cx, cy - radius),
+      Offset(cx, cy + radius),
+      linePaint,
+    );
+    canvas.drawLine(
+      Offset(cx - radius, cy),
+      Offset(cx + radius, cy),
+      linePaint,
+    );
+
+    // 扫描线
+    if (isScanning) {
+      canvas.drawLine(
+        Offset(cx, cy),
+        Offset(
+          cx + radius * math.cos(sweepAngle),
+          cy + radius * math.sin(sweepAngle),
+        ),
+        Paint()
+          ..color = const Color(0xFF3B82F6).withValues(alpha: 0.6)
+          ..strokeWidth = 1.5,
+      );
+    }
+
+    // 简约方向标记
+    final cardinals = [
+      ('N', -math.pi / 2, const Color(0xFFEF4444)),
+      ('E', 0.0, const Color(0xFF9CA3AF)),
+      ('S', math.pi / 2, const Color(0xFF9CA3AF)),
+      ('W', math.pi, const Color(0xFF9CA3AF)),
+    ];
+
+    for (final (letter, angle, color) in cardinals) {
+      final labelR = radius - 10;
+      final x = cx + labelR * math.cos(angle);
+      final y = cy + labelR * math.sin(angle);
+
+      final tp = TextPainter(
+        text: TextSpan(
+          text: letter,
+          style: TextStyle(
+            color: color,
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      );
+      tp.layout();
+      tp.paint(canvas, Offset(x - tp.width / 2, y - tp.height / 2));
+    }
+
+    // 中心点
+    canvas.drawCircle(
+      Offset(cx, cy),
+      2,
+      Paint()..color = const Color(0xFF9CA3AF),
+    );
+  }
+
+  @override
+  bool shouldRepaint(_SonarRadarPainter oldDelegate) {
+    return oldDelegate.sweepAngle != sweepAngle;
   }
 }
 
@@ -630,47 +822,102 @@ class _SosAlertCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFFFCE9EA), Color(0xFFF7D7D9), Color(0xFFF2C6CA)],
+          colors: [Color(0xFFFFF0F0), Color(0xFFFDE8E8), Color(0xFFFCD8D8)],
         ),
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: RescuePalette.critical),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: RescuePalette.critical.withValues(alpha: 0.3),
+          width: 1.5,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: RescuePalette.critical.withValues(alpha: 0.12),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // 顶部标题栏
           Row(
             children: [
-              const Icon(
-                Icons.warning_amber_rounded,
-                color: RescuePalette.critical,
-                size: 30,
+              // 脉冲警告图标
+              TweenAnimationBuilder<double>(
+                tween: Tween(begin: 1.0, end: 1.15),
+                duration: const Duration(milliseconds: 800),
+                curve: Curves.easeInOut,
+                builder: (_, value, __) {
+                  return Transform.scale(
+                    scale: value,
+                    child: Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        color: RescuePalette.critical.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(14),
+                      ),
+                      child: const Icon(
+                        Icons.warning_amber_rounded,
+                        color: RescuePalette.critical,
+                        size: 28,
+                      ),
+                    ),
+                  );
+                },
               ),
-              const SizedBox(width: 10),
+              const SizedBox(width: 14),
               Expanded(
-                child: Text(
-                  '发现附近有人求救！',
-                  style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                    color: RescuePalette.critical,
-                    fontWeight: FontWeight.w900,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '发现附近求救信号！',
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        color: RescuePalette.critical,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                    Text(
+                      '请及时响应并提供援助',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: RescuePalette.critical.withValues(alpha: 0.7),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 16),
+          const Divider(height: 24, thickness: 1),
+          // 指标网格
           Wrap(
             spacing: 10,
             runSpacing: 10,
             children: [
-              _AlertMetric(label: '距离估算', value: distanceText),
-              _AlertMetric(label: 'RSSI', value: '${message.rssi} dBm'),
-              _AlertMetric(label: '血型', value: message.bloodType.label),
               _AlertMetric(
+                icon: Icons.near_me,
+                label: '距离估算',
+                value: distanceText,
+              ),
+              _AlertMetric(
+                icon: Icons.signal_cellular_alt,
+                label: '信号强度',
+                value: '${message.rssi} dBm',
+              ),
+              _AlertMetric(
+                icon: Icons.bloodtype_outlined,
+                label: '血型',
+                value: message.bloodType.label,
+              ),
+              _AlertMetric(
+                icon: Icons.location_on_outlined,
                 label: '坐标',
                 value:
                     '${message.latitude.toStringAsFixed(5)}, ${message.longitude.toStringAsFixed(5)}',
@@ -678,49 +925,88 @@ class _SosAlertCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 14),
-          Text(
-            '设备 ID：${message.remoteId}',
-            style: Theme.of(
-              context,
-            ).textTheme.bodyMedium?.copyWith(color: RescuePalette.textPrimary),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            '接收时间：${message.receivedAt.toLocal()}',
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: RescuePalette.textMuted),
+          // 底部信息
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.6),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Flexible(
+                  child: Text(
+                    '设备: ${message.remoteId}',
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: RescuePalette.textPrimary,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Text(
+                  _formatRelativeTime(message.receivedAt),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: RescuePalette.textMuted,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
           ),
         ],
       ),
     );
   }
+
+  /// 格式化相对时间
+  String _formatRelativeTime(DateTime receivedAt) {
+    final diff = DateTime.now().difference(receivedAt);
+    if (diff.inSeconds < 60) return '${diff.inSeconds}s前';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}m前';
+    return '${diff.inHours}h前';
+  }
 }
 
 class _AlertMetric extends StatelessWidget {
-  const _AlertMetric({required this.label, required this.value});
+  const _AlertMetric({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
 
+  final IconData icon;
   final String label;
   final String value;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(minWidth: 124),
+      constraints: const BoxConstraints(minWidth: 120),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: 0.72),
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: RescuePalette.border),
+        color: Colors.white.withValues(alpha: 0.7),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: RescuePalette.critical.withValues(alpha: 0.12),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            label,
-            style: Theme.of(
-              context,
-            ).textTheme.bodySmall?.copyWith(color: RescuePalette.textMuted),
+          Row(
+            children: [
+              Icon(icon, size: 14, color: RescuePalette.critical),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: RescuePalette.textMuted,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
           ),
           const SizedBox(height: 4),
           Text(

@@ -8,7 +8,9 @@ import 'database.dart';
 import 'mesh_dashboard_page.dart';
 import 'message_page.dart';
 import 'models/emergency_profile.dart';
+import 'models/mesh_state_provider.dart';
 import 'models/sos_message.dart' as models;
+import 'models/sos_payload.dart';
 import 'profile_page.dart';
 import 'radar_demo_page.dart';
 import 'services/ble_mesh_service.dart';
@@ -66,22 +68,26 @@ class RescueApp extends StatelessWidget {
 
 enum _MainTab { dashboard, radar, ai, message, profile }
 
-class MainScreen extends StatefulWidget {
+class MainScreen extends ConsumerStatefulWidget {
   const MainScreen({super.key});
 
   @override
-  State<MainScreen> createState() => _MainScreenState();
+  ConsumerState<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends ConsumerState<MainScreen> {
   _MainTab _currentTab = _MainTab.dashboard;
   StreamSubscription<dynamic>? _incomingSosSubscription;
   bool _isInitializing = true;
   List<String> _initErrors = [];
+  late final VoidCallback _scannerStateListener;
 
   @override
   void initState() {
     super.initState();
+    _scannerStateListener = _syncScanState;
+    bleScannerService.addListener(_scannerStateListener);
+    _syncScanState();
     _initializeServices();
   }
 
@@ -114,10 +120,10 @@ class _MainScreenState extends State<MainScreen> {
       _incomingSosSubscription = bleScannerService.sosMessageStream.listen((
         message,
       ) {
-        appDb
-            .saveIncomingSos(message as models.SosMessage)
-            .catchError((_) => 0);
+        _ingestSosMessage(message);
+        appDb.saveIncomingSos(message).catchError((_) => 0);
       });
+      _syncScanState();
     }
 
     if (mounted) {
@@ -145,9 +151,64 @@ class _MainScreenState extends State<MainScreen> {
     }
   }
 
+  void _syncScanState() {
+    _updateMeshState((notifier) {
+      notifier.setScanning(bleScannerService.isScanning);
+    });
+  }
+
+  void _ingestSosMessage(models.SosMessage message) {
+    final payload = SosPayload(
+      protocolVersion: 1,
+      bloodType: message.bloodTypeCode,
+      latitude: message.latitude,
+      longitude: message.longitude,
+      timestamp: message.receivedAt.millisecondsSinceEpoch ~/ 1000,
+    );
+
+    _updateMeshState((notifier) {
+      notifier.addOrUpdateDevice(message.remoteId, payload, message.rssi);
+    });
+  }
+
+  void _updateMeshState(void Function(MeshStateNotifier notifier) update) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) {
+        return;
+      }
+      update(ref.read(meshStateProvider.notifier));
+    });
+  }
+
+  Future<void> _openRadarAndEnsureScanning() async {
+    if (mounted && _currentTab != _MainTab.radar) {
+      setState(() {
+        _currentTab = _MainTab.radar;
+      });
+    }
+
+    if (bleScannerService.isScanning) {
+      _syncScanState();
+      return;
+    }
+
+    try {
+      await bleScannerService.startScanning();
+      _syncScanState();
+    } on Exception catch (error) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('雷达扫描启动失败: $error')),
+      );
+    }
+  }
+
   @override
   void dispose() {
     _incomingSosSubscription?.cancel();
+    bleScannerService.removeListener(_scannerStateListener);
     bleScannerService.stopScanning().catchError((_) => null);
     bleMeshService.stopSosBroadcast().catchError((_) => null);
     networkSyncService.stopListening().catchError((_) => null);
@@ -253,7 +314,10 @@ class _MainScreenState extends State<MainScreen> {
               ],
             ),
           ),
-          body: _buildPage(effectiveTab),
+          body: IndexedStack(
+            index: selectedIndex,
+            children: visibleTabs.map(_buildPage).toList(),
+          ),
           bottomNavigationBar: BottomNavigationBar(
             currentIndex: selectedIndex,
             onTap: (index) {
@@ -295,7 +359,9 @@ class _MainScreenState extends State<MainScreen> {
 
   Widget _buildPage(_MainTab tab) {
     return switch (tab) {
-      _MainTab.dashboard => MeshDashboardPage(),
+      _MainTab.dashboard => MeshDashboardPage(
+        onRadarRequested: _openRadarAndEnsureScanning,
+      ),
       _MainTab.radar => const RadarDemoPage(),
       _MainTab.ai => const AiChatPage(),
       _MainTab.message => const MessagePage(),

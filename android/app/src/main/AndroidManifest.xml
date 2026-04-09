@@ -31,6 +31,9 @@
     
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    
+    <!-- Bluetooth 5.0+ LE Coded PHY 特性声明 (用于 300m Long Range) -->
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
 
 
     <application
