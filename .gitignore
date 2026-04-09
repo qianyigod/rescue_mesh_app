@@ -61,3 +61,6 @@ assets/models/*.pt
 
 # Flutter IDE metadata
 .metadata
+
+# Codex local temp/cache
+.codex_tmp/
