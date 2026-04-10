@@ -1,7 +1,7 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rescue_mesh_app/database.dart';
-import 'package:rescue_mesh_app/models/sos_message.dart';
+import 'package:life_network/database.dart';
+import 'package:life_network/models/sos_message.dart';
 
 void main() {
   group('AppDatabase SOS storage', () {

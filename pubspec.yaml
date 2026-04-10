@@ -1,5 +1,5 @@
-name: rescue_mesh_app
-description: "A new Flutter project."
+name: life_network
+description: "生命网 - 应急救援Mesh网络通信系统，支持离线地图、AR导航和SOS求救"
 publish_to: 'none'
 
 version: 1.0.0+1

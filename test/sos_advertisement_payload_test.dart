@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rescue_mesh_app/models/emergency_profile.dart';
-import 'package:rescue_mesh_app/models/sos_advertisement_payload.dart';
+import 'package:life_network/models/emergency_profile.dart';
+import 'package:life_network/models/sos_advertisement_payload.dart';
 
 void main() {
   test(

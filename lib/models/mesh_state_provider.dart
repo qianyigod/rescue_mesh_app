@@ -65,12 +65,19 @@ class DiscoveredDevice {
         other.payload == payload &&
         other.rssi == rssi &&
         other.firstDiscoveredAt == firstDiscoveredAt &&
-        other.lastUpdatedAt == lastUpdatedAt;
+        other.lastUpdatedAt == lastUpdatedAt &&
+        other.rangingResult == rangingResult;
   }
 
   @override
-  int get hashCode =>
-      Object.hash(macAddress, payload, rssi, firstDiscoveredAt, lastUpdatedAt);
+  int get hashCode => Object.hash(
+    macAddress,
+    payload,
+    rssi,
+    firstDiscoveredAt,
+    lastUpdatedAt,
+    rangingResult,
+  );
 }
 
 /// 网格网络状态
@@ -115,7 +122,7 @@ class MeshState {
   bool operator ==(Object other) {
     if (identical(this, other)) return true;
     return other is MeshState &&
-        other.discoveredDevices == discoveredDevices &&
+        mapEquals(other.discoveredDevices, discoveredDevices) &&
         other.lastScanTime == lastScanTime &&
         other.isScanning == isScanning;
   }
@@ -127,6 +134,9 @@ class MeshState {
 /// Mesh 状态通知器
 @riverpod
 class MeshStateNotifier extends _$MeshStateNotifier {
+  final Map<String, RssiRangingEngine> _rangingEngines =
+      <String, RssiRangingEngine>{};
+
   @override
   MeshState build() {
     return const MeshState(discoveredDevices: {}, isScanning: false);
@@ -145,7 +155,10 @@ class MeshStateNotifier extends _$MeshStateNotifier {
     final existingDevice = currentState.discoveredDevices[macAddress];
 
     // 使用统一测距引擎计算距离
-    final rangingEngine = RssiRangingEngine.instance();
+    final rangingEngine = _rangingEngines.putIfAbsent(
+      macAddress,
+      () => RssiRangingEngine(),
+    );
     final rangingResult = rangingEngine.estimateDistance(rssi);
 
     // 如果设备已存在，检查是否需要更新
@@ -198,6 +211,10 @@ class MeshStateNotifier extends _$MeshStateNotifier {
 
   /// 清除所有发现的设备
   void clearDevices() {
+    for (final engine in _rangingEngines.values) {
+      engine.reset();
+    }
+    _rangingEngines.clear();
     state = state.copyWith(discoveredDevices: {}, lastScanTime: DateTime.now());
   }
 
@@ -273,12 +290,19 @@ class MeshStateNotifier extends _$MeshStateNotifier {
   void removeStaleDevices(int staleThresholdSeconds) {
     final now = DateTime.now();
     final activeDevices = <String, DiscoveredDevice>{};
+    final staleKeys = <String>[];
 
     for (final entry in state.discoveredDevices.entries) {
       final age = now.difference(entry.value.lastUpdatedAt).inSeconds;
       if (age <= staleThresholdSeconds) {
         activeDevices[entry.key] = entry.value;
+      } else {
+        staleKeys.add(entry.key);
       }
+    }
+
+    for (final key in staleKeys) {
+      _rangingEngines.remove(key)?.reset();
     }
 
     if (activeDevices.length != state.discoveredDevices.length) {

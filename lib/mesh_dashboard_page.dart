@@ -133,7 +133,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
       setState(() {
         _actionStatus = widget.scannerService.isScanning
             ? '雷达页已打开，扫描正在运行。'
-            : '已切换到雷达页，请检查蓝牙与权限状态。';
+            : '雷达扫描已停止，请检查蓝牙与权限状态后重新启动。';
       });
       return;
     }
@@ -172,12 +172,17 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
     String? targetName,
     int? targetRssi,
   }) {
+    if (targetLatitude == null || targetLongitude == null) {
+      _showError('请先在雷达列表中选择带坐标的目标，再打开 AR 搜救罗盘。');
+      return;
+    }
+
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => ArRescueCompassPage(
-          targetLatitude: targetLatitude ?? 0.0,
-          targetLongitude: targetLongitude ?? 0.0,
+          targetLatitude: targetLatitude,
+          targetLongitude: targetLongitude,
           targetName: targetName ?? 'AR 导航',
           targetRssi: targetRssi ?? -70,
         ),
@@ -621,7 +626,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                       child: _ActionButton(
                         controller: _pulseController,
                         icon: Icons.explore,
-                        title: 'AR 救援罗盘',
+                        title: 'AR 搜救罗盘',
                         subtitle: '使用 AR 技术导航至求救者位置',
                         active: false,
                         activeColor: RescuePalette.accent,

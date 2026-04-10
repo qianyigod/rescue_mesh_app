@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rescue_mesh_app/models/sos_message.dart';
-import 'package:rescue_mesh_app/services/ble_mesh_service.dart';
+import 'package:life_network/models/sos_message.dart';
+import 'package:life_network/services/ble_mesh_service.dart';
 
 void main() {
   group('BleMeshService relay queue', () {

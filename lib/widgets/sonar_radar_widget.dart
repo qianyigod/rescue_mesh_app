@@ -146,19 +146,22 @@ class _SonarRadarWidgetState extends ConsumerState<SonarRadarWidget>
     const labelPadding = 20.0;
     final totalSize = widget.size + labelPadding * 2;
 
-    return SizedBox(
-      width: totalSize,
-      height: totalSize,
-      child: CustomPaint(
-        painter: RadarPainter(
-          scanProgress: _scanAnimation.value,
-          devices: devices,
-          deviceFadeAnimations: _deviceFadeAnimations,
-          centerX: totalSize / 2,
-          centerY: totalSize / 2,
-          radius: widget.size / 2 - 10,
-          heading: _currentHeading,
-          radarSize: widget.size,
+    return AnimatedBuilder(
+      animation: _scanController,
+      builder: (context, _) => SizedBox(
+        width: totalSize,
+        height: totalSize,
+        child: CustomPaint(
+          painter: RadarPainter(
+            scanProgress: _scanAnimation.value,
+            devices: devices,
+            deviceFadeAnimations: _deviceFadeAnimations,
+            centerX: totalSize / 2,
+            centerY: totalSize / 2,
+            radius: widget.size / 2 - 10,
+            heading: _currentHeading,
+            radarSize: widget.size,
+          ),
         ),
       ),
     );

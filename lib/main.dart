@@ -81,6 +81,7 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   bool _isInitializing = true;
   List<String> _initErrors = [];
   late final VoidCallback _scannerStateListener;
+  Timer? _staleDeviceCleanupTimer;
 
   @override
   void initState() {
@@ -88,6 +89,10 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     _scannerStateListener = _syncScanState;
     bleScannerService.addListener(_scannerStateListener);
     _syncScanState();
+    _staleDeviceCleanupTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => ref.read(meshStateProvider.notifier).removeStaleDevices(30),
+    );
     _initializeServices();
   }
 
@@ -121,7 +126,6 @@ class _MainScreenState extends ConsumerState<MainScreen> {
         message,
       ) {
         _ingestSosMessage(message);
-        appDb.saveIncomingSos(message).catchError((_) => 0);
       });
       _syncScanState();
     }
@@ -172,11 +176,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
   }
 
   void _updateMeshState(void Function(MeshStateNotifier notifier) update) {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) {
-        return;
+    if (!mounted) {
+      return;
+    }
+    // 使用 Future.microtask 确保在 widget 树构建完成后才更新 provider
+    // 避免 "Tried to modify a provider while the widget tree was building" 错误
+    Future.microtask(() {
+      if (mounted) {
+        update(ref.read(meshStateProvider.notifier));
       }
-      update(ref.read(meshStateProvider.notifier));
     });
   }
 
@@ -199,14 +207,15 @@ class _MainScreenState extends ConsumerState<MainScreen> {
       if (!mounted) {
         return;
       }
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('雷达扫描启动失败: $error')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('雷达扫描启动失败: $error')));
     }
   }
 
   @override
   void dispose() {
+    _staleDeviceCleanupTimer?.cancel();
     _incomingSosSubscription?.cancel();
     bleScannerService.removeListener(_scannerStateListener);
     bleScannerService.stopScanning().catchError((_) => null);

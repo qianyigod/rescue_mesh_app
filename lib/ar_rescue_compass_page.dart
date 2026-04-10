@@ -422,6 +422,7 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
 
   Future<void> _toggleCameraAssist() async {
     if (_cameraAssistEnabled) {
+      await _disposeCameraController();
       setState(() {
         _cameraAssistEnabled = false;
       });
@@ -432,6 +433,23 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
       _cameraAssistEnabled = true;
     });
     await _initializeCamera();
+  }
+
+  Future<void> _disposeCameraController() async {
+    final controller = _cameraController;
+    _cameraController = null;
+    if (controller != null) {
+      await controller.dispose();
+    }
+    if (mounted) {
+      setState(() {
+        _isCameraInitialized = false;
+        _isCameraLoading = false;
+      });
+    } else {
+      _isCameraInitialized = false;
+      _isCameraLoading = false;
+    }
   }
 
   double get _tiltMagnitude => math.max(_pitch.abs(), _roll.abs());
@@ -752,7 +770,7 @@ class _ArRescueCompassPageState extends State<ArRescueCompassPage> {
     _magnetometerSubscription?.cancel();
     _accelerometerSubscription?.cancel();
     _positionSubscription?.cancel();
-    _cameraController?.dispose();
+    unawaited(_disposeCameraController());
     super.dispose();
   }
 

@@ -413,7 +413,9 @@ class BleMeshService extends ChangeNotifier {
         );
       }
 
-      // Start the periodic timer to switch broadcasts
+      await _switchBroadcastPayload(forceImmediate: true, rethrowOnError: true);
+
+      // Start the periodic timer only after the first payload is confirmed live.
       _interleavedBroadcastTimer?.cancel();
       _interleavedBroadcastTimer = Timer.periodic(
         _broadcastSwitchInterval,
@@ -426,13 +428,6 @@ class BleMeshService extends ChangeNotifier {
         _relayFetchInterval,
         (_) => _refreshRelayPayloads(),
       );
-
-      // Set broadcasting state to true
-      _isBroadcastingNow = true;
-      _isBroadcastingController.add(true);
-      notifyListeners();
-
-      await _switchBroadcastPayload(forceImmediate: true);
 
       debugPrint(
         '[BLE Relay] Interleaved broadcast started with ${_relayQueue.length} payloads',
@@ -576,7 +571,10 @@ class BleMeshService extends ChangeNotifier {
   /// - Stop current broadcast
   /// - Wait for completion
   /// - Start new broadcast with next payload
-  Future<void> _switchBroadcastPayload({bool forceImmediate = false}) async {
+  Future<void> _switchBroadcastPayload({
+    bool forceImmediate = false,
+    bool rethrowOnError = false,
+  }) async {
     _pruneRelayQueue();
     if (_relayQueue.isEmpty) {
       debugPrint('[BLE Relay] Queue empty, skipping switch');
@@ -609,7 +607,9 @@ class BleMeshService extends ChangeNotifier {
       _pruneRelayQueue();
     } catch (error) {
       debugPrint('[BLE Relay] Error switching payload: $error');
-      // Don't rethrow - continue trying to switch
+      if (rethrowOnError) {
+        rethrow;
+      }
     }
   }
 
@@ -647,6 +647,12 @@ class BleMeshService extends ChangeNotifier {
     }
 
     try {
+      if (payloadBytes.length < 3) {
+        throw const BleMeshInvalidPayloadException(
+          'BLE manufacturer payload is too short.',
+        );
+      }
+
       // Extract manufacturer ID and payload from the full data
       final manufacturerId = (payloadBytes[1] << 8) | payloadBytes[0];
       final actualPayload = payloadBytes.sublist(2);
@@ -667,16 +673,23 @@ class BleMeshService extends ChangeNotifier {
       );
     } on PlatformException catch (error) {
       debugPrint('[BLE Relay] Error starting broadcast: ${error.code}');
-      // Don't rethrow - try to recover
-      _isBroadcastingNow = true;
-      _isBroadcastingController.add(true);
+      _isBroadcastingNow = false;
+      _isBroadcastingController.add(false);
       notifyListeners();
+      throw _mapPlatformException(error);
     } catch (error) {
       debugPrint('[BLE Relay] Unexpected error starting broadcast: $error');
-      // Don't rethrow - try to recover
-      _isBroadcastingNow = true;
-      _isBroadcastingController.add(true);
+      _isBroadcastingNow = false;
+      _isBroadcastingController.add(false);
       notifyListeners();
+      if (error is BleMeshException) {
+        throw error;
+      }
+      throw BleMeshPlatformException(
+        platformCode: 'broadcast_failed',
+        message: 'Failed to start BLE SOS broadcast.',
+        details: error,
+      );
     }
   }
 

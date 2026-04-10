@@ -245,7 +245,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
                     ),
                     const SizedBox(width: 5),
                     Text(
-                      '所有数据仅存储于本设备，仅在 SOS 广播时使用',
+                      '资料会保存在当前设备；发起 SOS 并联网同步时，基础医疗信息可能随求救记录一并上传。',
                       style: TextStyle(
                         fontSize: 11.5,
                         color: RescuePalette.textMuted.withValues(alpha: 0.8),
@@ -311,7 +311,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
                 ),
                 SizedBox(height: 3),
                 Text(
-                  '求救时随 SOS 信号自动广播给救援人员',
+                  '发起求救并完成同步后，可将关键信息共享给救援人员',
                   style: TextStyle(color: Colors.white70, fontSize: 12.5),
                 ),
               ],

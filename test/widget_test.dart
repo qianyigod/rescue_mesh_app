@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:rescue_mesh_app/main.dart';
+import 'package:life_network/main.dart';
 
 void main() {
   testWidgets('Rescue shell renders', (WidgetTester tester) async {

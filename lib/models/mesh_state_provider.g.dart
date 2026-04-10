@@ -44,7 +44,7 @@ final class MeshStateNotifierProvider
   }
 }
 
-String _$meshStateNotifierHash() => r'45aba01800519fb73a44c58f131387e31b5cad30';
+String _$meshStateNotifierHash() => r'5927881145fcf8b38ab603893f9fb3ea04a8b00d';
 
 /// Mesh 状态通知器
 

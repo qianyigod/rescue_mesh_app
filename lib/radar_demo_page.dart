@@ -70,7 +70,7 @@ class RadarDemoPage extends ConsumerWidget {
                 Text(
                   meshState.isScanning
                       ? '雷达正在监听附近 SOS 广播'
-                      : '雷达页已打开，但扫描尚未启动',
+                      : '雷达扫描已停止，当前未在监听附近 SOS 广播',
                   style: TextStyle(
                     color: Colors.white.withValues(alpha: 0.82),
                     fontSize: 13,

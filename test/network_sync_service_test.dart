@@ -6,9 +6,9 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
-import 'package:rescue_mesh_app/database.dart';
-import 'package:rescue_mesh_app/models/sos_message.dart';
-import 'package:rescue_mesh_app/services/network_sync_service.dart';
+import 'package:life_network/database.dart';
+import 'package:life_network/models/sos_message.dart';
+import 'package:life_network/services/network_sync_service.dart';
 
 void main() {
   group('NetworkSyncService', () {
@@ -32,8 +32,9 @@ void main() {
           requestBody = jsonDecode(request.body) as List<dynamic>;
           return http.Response('ok', 200);
         }),
-        connectivitySnapshotProvider:
-            () async => const [ConnectivityResult.wifi],
+        connectivitySnapshotProvider: () async => const [
+          ConnectivityResult.wifi,
+        ],
         connectivityStreamProvider: () => const Stream.empty(),
       );
 
@@ -60,8 +61,9 @@ void main() {
           requestCount += 1;
           return http.Response('ok', 200);
         }),
-        connectivitySnapshotProvider:
-            () async => const [ConnectivityResult.none],
+        connectivitySnapshotProvider: () async => const [
+          ConnectivityResult.none,
+        ],
         connectivityStreamProvider: () => connectivityController.stream,
       );
 
@@ -84,8 +86,9 @@ void main() {
       final service = NetworkSyncService(
         database: database,
         httpClient: MockClient((request) async => http.Response('error', 500)),
-        connectivitySnapshotProvider:
-            () async => const [ConnectivityResult.wifi],
+        connectivitySnapshotProvider: () async => const [
+          ConnectivityResult.wifi,
+        ],
         connectivityStreamProvider: () => const Stream.empty(),
       );
 

@@ -278,6 +278,26 @@ class RangingResult {
   /// 置信度（0.0 - 1.0）
   final double confidence;
 
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is RangingResult &&
+        other.rawRssi == rawRssi &&
+        other.filteredRssi == filteredRssi &&
+        other.estimatedDistance == estimatedDistance &&
+        other.confidence == confidence &&
+        other.environmentFactor == environmentFactor;
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    rawRssi,
+    filteredRssi,
+    estimatedDistance,
+    confidence,
+    environmentFactor,
+  );
+
   /// 使用的环境因子
   final double environmentFactor;
 

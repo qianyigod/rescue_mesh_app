@@ -138,7 +138,7 @@ class BleScannerService extends ChangeNotifier {
   }
 
   /// 处理 Coded PHY 扫描结果
-  void _handleCodedPhyResult(CodedPhyScanResult result) {
+  void _handleCodedPhyResult(CodedPhyScanResult result) async {
     // 提取 Manufacturer Specific Data
     final msd = result.msd;
     if (msd == null) return;
@@ -159,8 +159,7 @@ class BleScannerService extends ChangeNotifier {
         rssi: result.rssi,
         receivedAt: DateTime.now(),
       );
-      bleMeshService.addRelayMessage(message);
-      _sosMessageController.add(message);
+      await _ingestDecodedMessage(message);
       debugPrint(
         '[BLE Scanner Coded PHY] Decoded SOS from ${result.address} '
         '(rssi=${result.rssi}, phy=${result.phy}, isLongRange=${result.isCodedPhy})',
@@ -425,14 +424,7 @@ class BleScannerService extends ChangeNotifier {
           receivedAt: result.timeStamp,
           companyId: rescueCompanyId,
         );
-
-        // Save to database for persistence and upload
-        await appDb.saveIncomingSos(message);
-        bleMeshService.addRelayMessage(message);
-
-        if (_shouldEmit(message)) {
-          _sosMessageController.add(message);
-        }
+        await _ingestDecodedMessage(message);
       } on BleMeshException catch (error) {
         _setException(error);
       } catch (error) {
@@ -444,6 +436,14 @@ class BleScannerService extends ChangeNotifier {
           ),
         );
       }
+    }
+  }
+
+  Future<void> _ingestDecodedMessage(models.SosMessage message) async {
+    await appDb.saveIncomingSos(message);
+    bleMeshService.addRelayMessage(message);
+    if (_shouldEmit(message)) {
+      _sosMessageController.add(message);
     }
   }
 

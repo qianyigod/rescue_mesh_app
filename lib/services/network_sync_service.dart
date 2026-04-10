@@ -156,8 +156,9 @@ class NetworkSyncService extends ChangeNotifier {
         'records': uploadData,
       };
 
-      debugPrint('[NetworkSync] POST $_endpoint');
-      debugPrint('[NetworkSync] Body: ${jsonEncode(requestBody)}');
+      debugPrint(
+        '[NetworkSync] Uploading ${uploadData.length} SOS record(s) to $_endpoint',
+      );
 
       final response = await _httpClient
           .post(
@@ -167,8 +168,9 @@ class NetworkSyncService extends ChangeNotifier {
           )
           .timeout(_requestTimeout);
 
-      debugPrint('[NetworkSync] Response status: ${response.statusCode}');
-      debugPrint('[NetworkSync] Response body: ${response.body}');
+      debugPrint(
+        '[NetworkSync] Response status: ${response.statusCode}, bodyLength: ${response.body.length}',
+      );
 
       if (response.statusCode == 200) {
         await _database.markAsUploaded(

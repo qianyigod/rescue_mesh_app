@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rescue_mesh_app/services/ble_payload_encoder.dart';
+import 'package:life_network/services/ble_payload_encoder.dart';
 
 void main() {
   group('BlePayloadEncoder', () {

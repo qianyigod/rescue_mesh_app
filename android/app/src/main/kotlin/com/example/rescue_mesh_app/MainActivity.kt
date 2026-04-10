@@ -42,6 +42,7 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
     
     // 信号积分器：用于弱信号累积检测
     private val signalAccumulator = mutableMapOf<String, SignalSample>()
+    private val signalAccumulatorLock = Any()
     private var accumulatorTimer: java.util.Timer? = null
     
     data class SignalSample(
@@ -127,7 +128,7 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
             result.error("unsupported", "BLE advertising requires Android 5.0+.", null)
             return
         }
-        if (!hasBluetoothRuntimePermissions()) {
+        if (!hasBluetoothAdvertisePermissions()) {
             result.error(
                 "permission",
                 "BLUETOOTH_ADVERTISE or BLUETOOTH_CONNECT permission is missing.",
@@ -154,10 +155,11 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
 
         val manufacturerId = extractManufacturerId(call)
         val payload = extractPayloadBytes(call)
-        if (manufacturerId == null || payload == null || payload.size != 10) {
+        val supportedPayloadSizes = setOf(8, 10, 14)
+        if (manufacturerId == null || payload == null || payload.size !in supportedPayloadSizes) {
             result.error(
                 "invalid_args",
-                "manufacturerId is required and payload must be exactly 10 bytes.",
+                "manufacturerId is required and payload must be 8, 10, or 14 bytes.",
                 null,
             )
             return
@@ -274,7 +276,7 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
         }
     }
 
-    private fun hasBluetoothRuntimePermissions(): Boolean {
+    private fun hasBluetoothAdvertisePermissions(): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
             return true
         }
@@ -291,6 +293,25 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
             ) == PackageManager.PERMISSION_GRANTED
 
         return advertiseGranted && connectGranted
+    }
+
+    private fun hasBluetoothScanPermissions(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) {
+            return true
+        }
+
+        val scanGranted =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.BLUETOOTH_SCAN,
+            ) == PackageManager.PERMISSION_GRANTED
+        val connectGranted =
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.BLUETOOTH_CONNECT,
+            ) == PackageManager.PERMISSION_GRANTED
+
+        return scanGranted && connectGranted
     }
 
     private fun mapAdvertiseError(errorCode: Int): String {
@@ -324,7 +345,7 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
     }
 
     private fun startCodedPhyScan(result: MethodChannel.Result) {
-        if (!hasBluetoothRuntimePermissions()) {
+        if (!hasBluetoothScanPermissions()) {
             result.error("permission", "Missing Bluetooth permissions", null)
             return
         }
@@ -481,7 +502,9 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
         // 停止信号积分器
         accumulatorTimer?.cancel()
         accumulatorTimer = null
-        signalAccumulator.clear()
+        synchronized(signalAccumulatorLock) {
+            signalAccumulator.clear()
+        }
 
         scanCallback = null
         isScanning = false
@@ -490,7 +513,9 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
     // ===== 信号积分器定时器 =====
     private fun startSignalAccumulator() {
         accumulatorTimer?.cancel()
-        signalAccumulator.clear()
+        synchronized(signalAccumulatorLock) {
+            signalAccumulator.clear()
+        }
 
         val timer = java.util.Timer("SignalAccumulator", true)
         timer.scheduleAtFixedRate(
@@ -509,9 +534,12 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
 
     private fun flushAccumulatedSignals() {
         val now = System.currentTimeMillis()
+        val snapshots = synchronized(signalAccumulatorLock) {
+            signalAccumulator.mapValues { it.value.copy() }
+        }
         val toRemove = mutableListOf<String>()
         
-        for ((address, sample) in signalAccumulator) {
+        for ((address, sample) in snapshots) {
             // 超过5秒没更新的样本，视为过期
             if (now - sample.lastSeen > 5000) {
                 toRemove.add(address)
@@ -539,22 +567,26 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
         }
         
         // 清理过期样本
-        for (addr in toRemove) {
-            signalAccumulator.remove(addr)
+        synchronized(signalAccumulatorLock) {
+            for (addr in toRemove) {
+                signalAccumulator.remove(addr)
+            }
         }
     }
     
     private fun getAccumulatedSignals(result: MethodChannel.Result) {
-        val signals = signalAccumulator.values.map { sample ->
-            mapOf(
-                "address" to sample.address,
-                "name" to sample.name,
-                "count" to sample.count,
-                "avgRssi" to sample.avgRssi,
-                "maxRssi" to sample.maxRssi,
-                "phy" to sample.phy,
-                "msd" to sample.msd
-            )
+        val signals = synchronized(signalAccumulatorLock) {
+            signalAccumulator.values.map { sample ->
+                mapOf(
+                    "address" to sample.address,
+                    "name" to sample.name,
+                    "count" to sample.count,
+                    "avgRssi" to sample.avgRssi,
+                    "maxRssi" to sample.maxRssi,
+                    "phy" to sample.phy,
+                    "msd" to sample.msd
+                )
+            }
         }
         result.success(signals)
     }
@@ -564,7 +596,9 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
         stopCodedPhyScan()
         accumulatorTimer?.cancel()
         accumulatorTimer = null
-        signalAccumulator.clear()
+        synchronized(signalAccumulatorLock) {
+            signalAccumulator.clear()
+        }
         super.onDestroy()
     }
 

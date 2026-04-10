@@ -1,7 +1,7 @@
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
-import 'package:rescue_mesh_app/services/ble_scanner_service.dart';
+import 'package:life_network/services/ble_scanner_service.dart';
 
 void main() {
   group('BleScannerService.decodeSosPayload', () {
