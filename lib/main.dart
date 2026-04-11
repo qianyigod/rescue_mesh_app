@@ -325,7 +325,9 @@ class _MainScreenState extends ConsumerState<MainScreen> {
           ),
           body: IndexedStack(
             index: selectedIndex,
-            children: visibleTabs.map(_buildPage).toList(),
+            children: visibleTabs
+                .map((tab) => _buildPage(tab, effectiveTab))
+                .toList(),
           ),
           bottomNavigationBar: BottomNavigationBar(
             currentIndex: selectedIndex,
@@ -366,12 +368,12 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     );
   }
 
-  Widget _buildPage(_MainTab tab) {
+  Widget _buildPage(_MainTab tab, _MainTab activeTab) {
     return switch (tab) {
       _MainTab.dashboard => MeshDashboardPage(
         onRadarRequested: _openRadarAndEnsureScanning,
       ),
-      _MainTab.radar => const RadarDemoPage(),
+      _MainTab.radar => RadarDemoPage(isActive: activeTab == _MainTab.radar),
       _MainTab.ai => const AiChatPage(),
       _MainTab.message => const MessagePage(),
       _MainTab.profile => const ProfilePage(),

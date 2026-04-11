@@ -13,10 +13,8 @@ dependencies:
   fcllama: ^0.0.3
   flutter_blue_plus: ^1.35.5
   llama_cpp_dart: ^0.2.0
-  camera: ^0.11.0
   sensors_plus: ^6.1.1
   geolocator: ^13.0.2
-  vibration: ^2.0.1
   drift: ^2.19.0
   sqlite3_flutter_libs: ^0.5.24
   path_provider: ^2.1.3

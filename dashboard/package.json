@@ -10,6 +10,8 @@
   "dependencies": {
     "echarts": "^5.5.0",
     "leaflet": "^1.9.4",
+    "leaflet.heat": "^0.2.0",
+    "leaflet.markercluster": "^1.5.3",
     "socket.io-client": "^4.7.5",
     "vue": "^3.4.27"
   },

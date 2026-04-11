@@ -1,0 +1,329 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rescue Mesh App Summary</title>
+  <style>
+    @page {
+      size: A4;
+      margin: 10mm;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #dfe8ea;
+      color: #1e2e36;
+      font-family: "Segoe UI", Arial, sans-serif;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    body {
+      padding: 16px;
+    }
+
+    .page {
+      width: 190mm;
+      min-height: 276mm;
+      margin: 0 auto;
+      background: #f8fbfb;
+      border: 1px solid #c8d5d8;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 28px rgba(22, 43, 49, 0.12);
+    }
+
+    .hero {
+      padding: 18mm 16mm 10mm;
+      background:
+        radial-gradient(circle at top right, rgba(214, 64, 69, 0.14), transparent 36%),
+        linear-gradient(135deg, #10303a, #1c4a55 62%, #245c66);
+      color: #f7fbfc;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      background: rgba(255, 255, 255, 0.14);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+    }
+
+    h1 {
+      margin: 12px 0 8px;
+      font-size: 31px;
+      line-height: 1.04;
+      letter-spacing: -0.03em;
+    }
+
+    .lede {
+      margin: 0;
+      max-width: 92%;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: rgba(247, 251, 252, 0.92);
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .meta-card {
+      padding: 10px 12px;
+      border-radius: 12px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .meta-label {
+      display: block;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: rgba(247, 251, 252, 0.7);
+    }
+
+    .meta-value {
+      display: block;
+      margin-top: 4px;
+      font-size: 11px;
+      line-height: 1.35;
+      font-weight: 600;
+    }
+
+    .content {
+      padding: 12mm 12mm 11mm;
+      display: grid;
+      grid-template-columns: 1.06fr 0.94fr;
+      gap: 10px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 10px;
+    }
+
+    .card {
+      background: #ffffff;
+      border: 1px solid #d7e3e5;
+      border-radius: 14px;
+      padding: 11px 12px;
+    }
+
+    h2 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      line-height: 1.15;
+      color: #10303a;
+      letter-spacing: 0.01em;
+    }
+
+    p {
+      margin: 0;
+      font-size: 10.2px;
+      line-height: 1.45;
+      color: #30454d;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 17px;
+    }
+
+    li {
+      margin: 0 0 4px;
+      font-size: 10px;
+      line-height: 1.34;
+      color: #284049;
+    }
+
+    li:last-child {
+      margin-bottom: 0;
+    }
+
+    .persona {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 6px 9px;
+      border-radius: 10px;
+      font-size: 10px;
+      line-height: 1.35;
+      background: #eef4f5;
+      color: #27414a;
+      border: 1px solid #d7e2e4;
+    }
+
+    .flow {
+      margin-top: 8px;
+      display: grid;
+      gap: 6px;
+    }
+
+    .flow-step {
+      padding: 7px 8px;
+      border-radius: 10px;
+      background: #f3f7f8;
+      border: 1px solid #dde7e8;
+      font-size: 9.6px;
+      line-height: 1.33;
+      color: #274049;
+    }
+
+    .flow-step strong {
+      color: #15343d;
+    }
+
+    .mini {
+      margin-top: 7px;
+      font-size: 9px;
+      line-height: 1.35;
+      color: #5b6f76;
+    }
+
+    .footer {
+      padding: 0 12mm 10mm;
+      font-size: 8.4px;
+      line-height: 1.35;
+      color: #60737a;
+    }
+
+    .footer strong {
+      color: #39525a;
+    }
+
+    @media print {
+      body {
+        padding: 0;
+        background: #ffffff;
+      }
+
+      .page {
+        width: auto;
+        min-height: 0;
+        margin: 0;
+        border: none;
+        border-radius: 0;
+        box-shadow: none;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="hero">
+      <span class="eyebrow">Repo Summary</span>
+      <h1>Rescue Mesh App</h1>
+      <p class="lede">
+        Rescue Mesh is an offline-first emergency communication app built around BLE SOS beacons, local storage,
+        and delayed network sync. The repo also includes an optional Node.js command server, a Vue command dashboard,
+        offline map support, and an on-device AI first-aid assistant.
+      </p>
+      <div class="meta">
+        <div class="meta-card">
+          <span class="meta-label">Primary target</span>
+          <span class="meta-value">Android field phone with BLE broadcast and scan support</span>
+        </div>
+        <div class="meta-card">
+          <span class="meta-label">Core stack</span>
+          <span class="meta-value">Flutter + Riverpod + Drift/SQLite + BLE + optional Node/Vue services</span>
+        </div>
+        <div class="meta-card">
+          <span class="meta-label">Evidence base</span>
+          <span class="meta-value">README, lib/, server/src/, dashboard/src/, pubspec.yaml</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="content">
+      <div class="stack">
+        <article class="card">
+          <h2>Who It's For</h2>
+          <p>
+            Primary persona: a person in a disaster or disconnected rescue scene carrying an Android phone,
+            either as an SOS sender or as a passerby "data mule" relay node that helps move alerts toward connectivity.
+          </p>
+          <div class="persona">
+            Repo evidence points to two field roles: the distressed user broadcasting SOS and nearby users scanning,
+            relaying, caching, and later uploading those records.
+          </div>
+        </article>
+
+        <article class="card">
+          <h2>What It Does</h2>
+          <ul>
+            <li>Triggers SOS with a live location fix, saves it locally, and starts BLE distress broadcast.</li>
+            <li>Scans nearby BLE rescue payloads, decodes them, de-duplicates them, and stores them in SQLite.</li>
+            <li>Relays other devices' SOS payloads through a BLE relay queue for multi-hop propagation.</li>
+            <li>Auto-syncs pending local records to a backend endpoint when connectivity returns.</li>
+            <li>Shows nearby devices in radar UI and an offline tactical map backed by MBTiles.</li>
+            <li>Provides a Vue command screen with live alerts, map markers, blood-type counts, and trend stats.</li>
+            <li>Includes an offline AI first-aid chat and an ultra power-saving mode for field endurance.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="card">
+          <h2>How It Works</h2>
+          <p>
+            <strong>Mobile app:</strong> <code>main.dart</code> initializes <code>PowerSavingManager</code>,
+            <code>BleMeshService</code>, <code>BleScannerService</code>, and <code>NetworkSyncService</code>, while
+            Riverpod <code>meshStateProvider</code> feeds dashboard and radar UI.
+          </p>
+          <div class="flow">
+            <div class="flow-step">
+              <strong>SOS path:</strong> <code>SosTriggerService</code> gets location, writes to Drift/SQLite, starts BLE advertising,
+              then tries immediate sync.
+            </div>
+            <div class="flow-step">
+              <strong>Scan path:</strong> BLE scan results are decoded, saved via <code>saveIncomingSos()</code>,
+              added to the relay queue, and emitted to the UI after duplicate suppression.
+            </div>
+            <div class="flow-step">
+              <strong>Sync path:</strong> pending local records are POSTed to <code>/api/sos/sync</code>;
+              Express/MongoDB merges or creates <code>SosRecord</code> documents and broadcasts Socket.IO updates.
+            </div>
+            <div class="flow-step">
+              <strong>Dashboard path:</strong> Vue fetches <code>/api/sos/active</code>, listens for <code>new_sos_alert</code>,
+              and renders alert feed, Leaflet map, and ECharts metrics.
+            </div>
+          </div>
+          <p class="mini">
+            Offline map rendering uses <code>MbtilesReader</code> and falls back to online tiles when an MBTiles file is unavailable.
+          </p>
+        </article>
+
+        <article class="card">
+          <h2>How To Run</h2>
+          <ul>
+            <li><strong>Mobile app:</strong> <code>flutter pub get</code> then <code>flutter run -d &lt;device_id&gt;</code>.</li>
+            <li><strong>Permissions:</strong> grant Bluetooth and location access on first Android launch.</li>
+            <li><strong>Optional backend:</strong> <code>cd server</code>, <code>npm install</code>, create <code>.env</code>, then <code>node src/index.js</code>.</li>
+            <li><strong>Optional dashboard:</strong> <code>cd dashboard</code>, <code>npm install</code>, then <code>npm run dev</code>.</li>
+            <li><strong>When targeting your own server:</strong> run Flutter with <code>--dart-define=API_BASE_URL=http://&lt;LAN_IP&gt;:3000</code>.</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <div class="footer">
+      <strong>Note:</strong> The request text conflicted between "10-page PDF" and "1 page total." This deliverable follows the explicit
+      layout/content constraint and keeps the full summary on a single page with no intentional overflow.
+    </div>
+  </main>
+</body>
+</html>

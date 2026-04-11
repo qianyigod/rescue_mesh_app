@@ -1,35 +1,9 @@
-import { computed, reactive, ref } from 'vue'
+import { ref, reactive } from 'vue'
 import { io } from 'socket.io-client'
 
-function resolveServerBaseUrl() {
-  const envSocketUrl = import.meta.env.VITE_SOCKET_URL?.trim()
-  const envApiBase = import.meta.env.VITE_API_BASE?.trim()
-
-  if (envSocketUrl || envApiBase) {
-    return {
-      socketUrl: envSocketUrl || envApiBase,
-      apiBase: envApiBase || envSocketUrl,
-    }
-  }
-
-  if (typeof window === 'undefined') {
-    return {
-      socketUrl: 'http://101.35.52.133:3000',
-      apiBase: 'http://101.35.52.133:3000',
-    }
-  }
-
-  const { hostname, origin } = window.location
-  const isLocalDev = hostname === 'localhost' || hostname === '127.0.0.1'
-
-  return {
-    socketUrl: isLocalDev ? 'http://localhost:3000' : origin,
-    apiBase: isLocalDev ? 'http://localhost:3000' : origin,
-  }
-}
-
-const { socketUrl: SOCKET_URL, apiBase: API_BASE } = resolveServerBaseUrl()
-const SOCKET_PATH = import.meta.env.VITE_SOCKET_PATH?.trim() || '/socket.io'
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:3000'
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000'
+const MAX_ALERTS = 300
 
 export const BLOOD_LABELS = {
   '-1': '未知',
@@ -48,7 +22,6 @@ export const BLOOD_COLORS = {
 }
 
 const connected = ref(false)
-const connectionError = ref('')
 const alerts = ref([])
 const activeCount = ref(0)
 const bloodCounts = reactive({ '-1': 0, '0': 0, '1': 0, '2': 0, '3': 0 })
@@ -58,285 +31,185 @@ const medicalStats = reactive({
   allergyCount: 0,
   historyCount: 0,
 })
-const selectedAlertId = ref('')
-const deletingIds = ref([])
+
+const searchState = reactive({
+  keyword: '',
+  blood: '',
+  time: '',
+  activeKeys: new Set(),
+  hasFilter: false,
+})
 
 let socket = null
+const alertKeyIndex = new Map()
 
 function getAlertKey(sos) {
-  return String(sos?._id ?? sos?.id ?? `${sos?.senderMac ?? 'UNKNOWN'}-${sos?.timestamp ?? 'UNKNOWN'}`)
+  if (!sos) return ''
+  if (sos._id) return String(sos._id)
+
+  const senderMac = String(sos.senderMac || '').trim()
+  const date = sos.timestamp ? new Date(sos.timestamp) : null
+  const timestamp = date && !Number.isNaN(date.getTime())
+    ? date.toISOString()
+    : String(sos.timestamp || '')
+
+  return `${senderMac}|${timestamp}`
 }
 
-function normalizeAlert(raw) {
-  if (!raw?.location?.coordinates || raw.location.coordinates.length !== 2) {
-    return null
-  }
-
-  return {
-    ...raw,
-    _id: String(raw._id ?? raw.id ?? getAlertKey(raw)),
-    senderMac: raw.senderMac || 'UNKNOWN',
-    status: raw.status || 'active',
-    reportedBy: Array.isArray(raw.reportedBy) ? raw.reportedBy : [],
-    medicalProfile: raw.medicalProfile || {},
-  }
+function sortAlertsByTimeDesc(list) {
+  return [...list].sort((a, b) => {
+    const aTime = new Date(a?.timestamp || 0).getTime()
+    const bTime = new Date(b?.timestamp || 0).getTime()
+    return bTime - aTime
+  })
 }
 
-function resolveBloodType(alert) {
-  const detail = alert?.medicalProfile?.bloodTypeDetail
-  if (detail !== undefined && detail !== null && detail !== -1) {
-    return String(detail)
-  }
-  return String(alert?.bloodType ?? -1)
+function rebuildAlertIndex() {
+  alertKeyIndex.clear()
+  alerts.value.forEach((item, index) => {
+    const key = getAlertKey(item)
+    if (key) {
+      alertKeyIndex.set(key, index)
+    }
+  })
 }
 
-function recomputeMetrics() {
-  activeCount.value = alerts.value.length
+function resetDerivedStats() {
+  activeCount.value = 0
 
-  for (const key of Object.keys(bloodCounts)) {
+  Object.keys(bloodCounts).forEach((key) => {
     bloodCounts[key] = 0
-  }
+  })
 
-  hourlyCounts.value = Array(12).fill(0)
   medicalStats.totalWithProfile = 0
   medicalStats.allergyCount = 0
   medicalStats.historyCount = 0
-
-  for (const alert of alerts.value) {
-    const bloodType = resolveBloodType(alert)
-    bloodCounts[bloodType] = (bloodCounts[bloodType] || 0) + 1
-
-    const diffHours = Math.floor(
-      (Date.now() - new Date(alert.timestamp).getTime()) / 3_600_000,
-    )
-    if (diffHours >= 0 && diffHours < 12) {
-      hourlyCounts.value[11 - diffHours] += 1
-    }
-
-    const profile = alert.medicalProfile || {}
-    if (profile.name || profile.age) {
-      medicalStats.totalWithProfile += 1
-    }
-    if (profile.allergies) {
-      medicalStats.allergyCount += 1
-    }
-    if (profile.medicalHistory) {
-      medicalStats.historyCount += 1
-    }
-  }
 }
 
-function upsertAlert(rawAlert) {
-  const alert = normalizeAlert(rawAlert)
-  if (!alert) {
+function recomputeDerivedStats() {
+  resetDerivedStats()
+
+  alerts.value.forEach((sos) => {
+    if (sos?.status === 'active') {
+      activeCount.value++
+    }
+
+    const bt = String(sos?.bloodType ?? -1)
+    bloodCounts[bt] = (bloodCounts[bt] || 0) + 1
+
+    const mp = sos?.medicalProfile
+    if (mp) {
+      if (mp.name || mp.age) medicalStats.totalWithProfile++
+      if (mp.allergies) medicalStats.allergyCount++
+      if (mp.medicalHistory) medicalStats.historyCount++
+    }
+  })
+}
+
+function trimAlerts() {
+  if (alerts.value.length <= MAX_ALERTS) return
+  alerts.value = alerts.value.slice(0, MAX_ALERTS)
+  rebuildAlertIndex()
+}
+
+function removeAlertByKey(key) {
+  const existingIndex = alertKeyIndex.get(key)
+  if (existingIndex == null) return
+
+  alerts.value.splice(existingIndex, 1)
+  rebuildAlertIndex()
+  recomputeDerivedStats()
+}
+
+function upsertAlert(sos) {
+  const key = getAlertKey(sos)
+  if (!key) return
+
+  if (sos?.status && sos.status !== 'active') {
+    removeAlertByKey(key)
     return
   }
 
-  const nextAlerts = [...alerts.value]
-  const index = nextAlerts.findIndex((item) => item._id === alert._id)
-  if (index >= 0) {
-    nextAlerts[index] = { ...nextAlerts[index], ...alert }
+  const next = { ...sos }
+  const existingIndex = alertKeyIndex.get(key)
+
+  if (existingIndex != null) {
+    const prev = alerts.value[existingIndex] || {}
+    alerts.value.splice(existingIndex, 1, { ...prev, ...next })
   } else {
-    nextAlerts.unshift(alert)
+    alerts.value.unshift(next)
   }
 
-  nextAlerts.sort((left, right) => {
-    return new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime()
-  })
-
-  alerts.value = nextAlerts
-  recomputeMetrics()
+  alerts.value = sortAlertsByTimeDesc(alerts.value)
+  trimAlerts()
+  rebuildAlertIndex()
+  recomputeDerivedStats()
 }
 
-function replaceAlerts(rawAlerts) {
-  const nextAlerts = rawAlerts
-    .map(normalizeAlert)
-    .filter(Boolean)
-    .sort((left, right) => {
-      return new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime()
-    })
+function replaceAlerts(list) {
+  const merged = new Map()
 
-  alerts.value = nextAlerts
+  ;(Array.isArray(list) ? list : []).forEach((item) => {
+    const key = getAlertKey(item)
+    if (!key) return
 
-  if (selectedAlertId.value) {
-    const stillSelected = nextAlerts.some((alert) => alert._id === selectedAlertId.value)
-    if (!stillSelected) {
-      selectedAlertId.value = ''
-    }
-  }
-
-  recomputeMetrics()
-}
-
-function removeAlertById(alertId) {
-  const normalizedId = String(alertId)
-  alerts.value = alerts.value.filter((alert) => alert._id !== normalizedId)
-  deletingIds.value = deletingIds.value.filter((id) => id !== normalizedId)
-
-  if (selectedAlertId.value === normalizedId) {
-    selectedAlertId.value = alerts.value[0]?._id || ''
-  }
-
-  recomputeMetrics()
-}
-
-async function fetchActiveFromServer() {
-  const response = await fetch(`${API_BASE}/api/sos/active`, {
-    cache: 'no-store',
+    const prev = merged.get(key) || {}
+    merged.set(key, { ...prev, ...item })
   })
 
-  if (!response.ok) {
-    throw new Error(`HTTP ${response.status}`)
-  }
-
-  const json = await response.json()
-  replaceAlerts(json.data || [])
-}
-
-function selectAlert(alertOrId) {
-  const alertId = typeof alertOrId === 'string' ? alertOrId : getAlertKey(alertOrId)
-  selectedAlertId.value = alertId
-}
-
-function clearSelection() {
-  selectedAlertId.value = ''
-}
-
-async function deleteAlert(alertOrId) {
-  const alertId = typeof alertOrId === 'string' ? alertOrId : getAlertKey(alertOrId)
-  if (!alertId) {
-    return
-  }
-
-  if (deletingIds.value.includes(alertId)) {
-    return
-  }
-
-  deletingIds.value = [...deletingIds.value, alertId]
-
-  try {
-    const response = await fetch(`${API_BASE}/api/sos/${alertId}`, {
-      method: 'DELETE',
-    })
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`)
-    }
-
-    removeAlertById(alertId)
-  } finally {
-    deletingIds.value = deletingIds.value.filter((id) => id !== alertId)
-  }
-}
-
-function attachSocketListeners(instance) {
-  instance.on('connect', () => {
-    connected.value = true
-    connectionError.value = ''
-    console.info('[Socket] Connected:', instance.id)
-    void fetchActiveFromServer().catch((error) => {
-      console.warn('[Socket] Failed to refresh active SOS data:', error.message)
-    })
-  })
-
-  instance.on('disconnect', (reason) => {
-    connected.value = false
-    console.warn('[Socket] Disconnected:', reason)
-
-    if (reason === 'io server disconnect') {
-      instance.connect()
-    }
-  })
-
-  instance.on('connect_error', (error) => {
-    connected.value = false
-    connectionError.value = error.message
-    console.error('[Socket] Connect error:', error.message)
-  })
-
-  instance.on('new_sos_alert', upsertAlert)
-  instance.on('sos_deleted', (payload) => {
-    if (payload?.id) {
-      removeAlertById(payload.id)
-    }
-  })
-
-  instance.io.on('reconnect_attempt', (attempt) => {
-    console.warn('[Socket] Reconnect attempt:', attempt)
-  })
-
-  instance.io.on('reconnect', (attempt) => {
-    connected.value = true
-    connectionError.value = ''
-    console.info('[Socket] Reconnected after attempts:', attempt)
-  })
-
-  instance.io.on('reconnect_error', (error) => {
-    connectionError.value = error.message
-    console.error('[Socket] Reconnect error:', error.message)
-  })
+  alerts.value = sortAlertsByTimeDesc(Array.from(merged.values())).slice(0, MAX_ALERTS)
+  rebuildAlertIndex()
+  recomputeDerivedStats()
 }
 
 export function useSocket() {
-  const selectedAlert = computed(() => {
-    return alerts.value.find((alert) => alert._id === selectedAlertId.value) || null
-  })
-
   function connect() {
-    if (socket) {
-      if (!socket.connected) {
-        socket.connect()
-      }
-      return
-    }
-
-    socket = io(SOCKET_URL, {
-      path: SOCKET_PATH,
-      transports: ['websocket', 'polling'],
-      timeout: 10000,
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      randomizationFactor: 0.5,
-      autoConnect: false,
-    })
-
-    attachSocketListeners(socket)
-    socket.connect()
+    if (socket) return
+    socket = io(SOCKET_URL, { transports: ['websocket', 'polling'] })
+    socket.on('connect', () => { connected.value = true })
+    socket.on('disconnect', () => { connected.value = false })
+    socket.on('new_sos_alert', upsertAlert)
   }
 
   async function fetchActive() {
     try {
-      await fetchActiveFromServer()
-    } catch (error) {
-      console.warn('[fetchActive] Failed to load active SOS data:', error.message)
+      const res = await fetch(`${API_BASE}/api/sos/active`)
+      const json = await res.json()
+      replaceAlerts(json.data || [])
+    } catch (e) {
+      console.warn('[fetchActive] 无法加载活跃告警:', e.message)
+    }
+  }
+
+  async function fetchHourlyStats() {
+    try {
+      const res = await fetch(`${API_BASE}/api/sos/hourly-stats`)
+      const json = await res.json()
+      if (json.data && Array.isArray(json.data)) {
+        hourlyCounts.value = json.data
+      }
+    } catch (e) {
+      console.warn('[fetchHourlyStats] 无法加载趋势数据:', e.message)
     }
   }
 
   function disconnect() {
     socket?.disconnect()
     socket = null
-    connected.value = false
   }
 
   return {
     connected,
-    connectionError,
     alerts,
     activeCount,
     bloodCounts,
     hourlyCounts,
     medicalStats,
-    selectedAlert,
-    selectedAlertId,
-    deletingIds,
+    searchState,
     connect,
     fetchActive,
+    fetchHourlyStats,
     disconnect,
-    selectAlert,
-    clearSelection,
-    deleteAlert,
-    getAlertKey,
+    upsertAlert,
   }
 }

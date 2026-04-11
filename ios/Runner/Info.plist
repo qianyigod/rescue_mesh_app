@@ -50,9 +50,6 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	
-	<!-- AR Rescue Compass Permissions -->
-	<key>NSCameraUsageDescription</key>
-	<string>需要使用摄像头进行 AR 搜救导航，在屏幕上显示实时画面以叠加救援标靶</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>需要获取您的位置来计算目标求救者的方位角和距离</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
