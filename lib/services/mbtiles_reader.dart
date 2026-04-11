@@ -59,6 +59,12 @@ class MbtilesReader {
     return _metadata?[key] as String?;
   }
 
+  String? get attribution => getMetadata('attribution');
+
+  String? get name => getMetadata('name');
+
+  String? get description => getMetadata('description');
+
   /// 获取最小缩放级别
   int get minZoom {
     final value = getMetadata('minzoom');
@@ -73,18 +79,54 @@ class MbtilesReader {
 
   /// 获取地图中心点
   LatLng? get center {
-    final bounds = getMetadata('bounds');
-    if (bounds != null) {
-      final parts = bounds.split(',');
+    final centerValue = getMetadata('center');
+    if (centerValue != null) {
+      final parts = centerValue.split(',');
       if (parts.length >= 2) {
-        final lon = double.tryParse(parts[0]);
-        final lat = double.tryParse(parts[1]);
+        final lon = double.tryParse(parts[0].trim());
+        final lat = double.tryParse(parts[1].trim());
         if (lon != null && lat != null) {
           return LatLng(lat, lon);
         }
       }
     }
+
+    final boundsValue = getMetadata('bounds');
+    final bounds = parseBounds(boundsValue);
+    if (bounds != null) {
+      final centerLat = (bounds.south + bounds.north) / 2;
+      final centerLon = (bounds.west + bounds.east) / 2;
+      return LatLng(centerLat, centerLon);
+    }
     return null;
+  }
+
+  MbtilesBounds? get bounds => parseBounds(getMetadata('bounds'));
+
+  static MbtilesBounds? parseBounds(String? value) {
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+
+    final parts = value.split(',');
+    if (parts.length < 4) {
+      return null;
+    }
+
+    final west = double.tryParse(parts[0].trim());
+    final south = double.tryParse(parts[1].trim());
+    final east = double.tryParse(parts[2].trim());
+    final north = double.tryParse(parts[3].trim());
+    if (west == null || south == null || east == null || north == null) {
+      return null;
+    }
+
+    return MbtilesBounds(
+      west: west,
+      south: south,
+      east: east,
+      north: north,
+    );
   }
 
   /// 获取指定坐标的瓦片数据
@@ -118,6 +160,22 @@ class MbtilesReader {
     final tileData = await getTile(z, x, y);
     return tileData != null;
   }
+}
+
+class MbtilesBounds {
+  const MbtilesBounds({
+    required this.west,
+    required this.south,
+    required this.east,
+    required this.north,
+  });
+
+  final double west;
+  final double south;
+  final double east;
+  final double north;
+
+  LatLng get center => LatLng((south + north) / 2, (west + east) / 2);
 }
 
 /// 基于 MBTiles 的 TileProvider

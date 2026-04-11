@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'offline_map_page.dart';
 import 'models/emergency_profile.dart';
 import 'models/sos_message.dart';
 import 'services/ble_mesh_exceptions.dart';
@@ -150,6 +151,17 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
     } on BleMeshException catch (error) {
       _showError(error.message);
     }
+  }
+
+  Future<void> _openOfflineMap() async {
+    if (!mounted) {
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const OfflineMapPage(),
+      ),
+    );
   }
 
   void _showError(String message) {
@@ -351,14 +363,6 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                       ),
                       const SizedBox(height: 14),
                       const Center(child: MiniSonarRadarWidget(size: 180)),
-                      const SizedBox(height: 14),
-                      const Text(
-                        '搜寻逻辑已统一到雷达页。进入雷达后，系统会根据锁定目标的 RSSI/测距结果加快滴滴节奏。',
-                        style: TextStyle(
-                          color: RescuePalette.textMuted,
-                          height: 1.5,
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -367,21 +371,7 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                   stream: _sosStream,
                   builder: (context, snapshot) {
                     if (!snapshot.hasData) {
-                      return Container(
-                        padding: const EdgeInsets.all(18),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.circular(24),
-                          border: Border.all(color: RescuePalette.border),
-                        ),
-                        child: const Text(
-                          '当前没有新的求救信号。启动雷达扫描后，这里会优先显示最近一次 SOS 事件。',
-                          style: TextStyle(
-                            color: RescuePalette.textMuted,
-                            height: 1.5,
-                          ),
-                        ),
-                      );
+                      return const SizedBox.shrink();
                     }
 
                     final message = snapshot.data!;
@@ -414,9 +404,12 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                       ),
                     ),
                   ),
-                Row(
+                Wrap(
+                  spacing: 14,
+                  runSpacing: 14,
                   children: [
-                    Expanded(
+                    SizedBox(
+                      width: (MediaQuery.of(context).size.width - 64) / 2,
                       child: _ActionButton(
                         controller: _pulseController,
                         icon: Icons.sos,
@@ -433,8 +426,8 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                         onTap: _toggleSosBroadcast,
                       ),
                     ),
-                    const SizedBox(width: 14),
-                    Expanded(
+                    SizedBox(
+                      width: (MediaQuery.of(context).size.width - 64) / 2,
                       child: _ActionButton(
                         controller: _pulseController,
                         icon: Icons.radar,
@@ -449,6 +442,20 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                         idleBackground: RescuePalette.successSoft,
                         iconColor: RescuePalette.success,
                         onTap: _toggleRadarScanning,
+                      ),
+                    ),
+                    SizedBox(
+                      width: (MediaQuery.of(context).size.width - 64) / 2,
+                      child: _ActionButton(
+                        controller: _pulseController,
+                        icon: Icons.map_outlined,
+                        title: '离线地图',
+                        subtitle: '查看 MBTiles 地图与求救点分布',
+                        active: false,
+                        activeColor: const Color(0xFF2563EB),
+                        idleBackground: const Color(0xFFEAF2FF),
+                        iconColor: const Color(0xFF2563EB),
+                        onTap: _openOfflineMap,
                       ),
                     ),
                   ],

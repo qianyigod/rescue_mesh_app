@@ -36,6 +36,13 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
   bool _useOnlineFallback = false;
   bool _isLoading = true;
   String? _mapFilePath;
+  LatLng? _offlineMapCenter;
+  double _offlineInitialZoom = 13.0;
+  double _offlineMinZoom = 10.0;
+  double _offlineMaxZoom = 16.0;
+  double _offlineMinNativeZoom = 10.0;
+  double _offlineMaxNativeZoom = 16.0;
+  String _mapAttributionLabel = '地图来源待识别';
   LatLng? _currentPosition;
   final MapController _mapController = MapController();
   StreamSubscription<Position>? _positionStreamSubscription;
@@ -66,9 +73,12 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
   Future<void> _checkNetworkStatus() async {
     try {
       final connectivityResult = await Connectivity().checkConnectivity();
+      final hasNetwork = connectivityResult.any(
+        (result) => result != ConnectivityResult.none,
+      );
       // 网络状态用于日志记录和调试
       debugPrint(
-        '网络状态: ${connectivityResult != ConnectivityResult.none ? "已连接" : "无连接"}',
+        '网络状态: ${hasNetwork ? "已连接" : "无连接"}',
       );
     } catch (e) {
       debugPrint('网络状态检查失败: $e');
@@ -195,13 +205,25 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
         try {
           final reader = MbtilesReader(filePath: localMapFile.path);
           await reader.open();
+          final center = reader.center;
+          final minZoom = reader.minZoom;
+          final maxZoom = reader.maxZoom;
+          final attribution = _buildOfflineAttribution(reader);
           reader.close();
 
           setState(() {
             _mapFilePath = localMapFile.path;
+            _offlineMapCenter = center;
+            _offlineMinNativeZoom = minZoom.toDouble();
+            _offlineMaxNativeZoom = maxZoom.toDouble();
+            _offlineMinZoom = (minZoom - 1).clamp(1, minZoom).toDouble();
+            _offlineMaxZoom = (maxZoom + 2).toDouble();
+            _offlineInitialZoom = maxZoom >= 15 ? 15.0 : maxZoom.toDouble();
+            _mapAttributionLabel = attribution;
             _useOnlineFallback = false;
             _isLoading = false;
           });
+          _moveToOfflineCenterIfNeeded();
           return;
         } catch (e) {
           debugPrint('MBTiles 文件损坏，将在在线模式下运行: $e');
@@ -232,24 +254,75 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
       // 验证复制后的文件
       final reader = MbtilesReader(filePath: targetFile.path);
       await reader.open();
+      final center = reader.center;
+      final minZoom = reader.minZoom;
+      final maxZoom = reader.maxZoom;
+      final attribution = _buildOfflineAttribution(reader);
       reader.close();
 
       setState(() {
         _mapFilePath = targetFile.path;
+        _offlineMapCenter = center;
+        _offlineMinNativeZoom = minZoom.toDouble();
+        _offlineMaxNativeZoom = maxZoom.toDouble();
+        _offlineMinZoom = (minZoom - 1).clamp(1, minZoom).toDouble();
+        _offlineMaxZoom = (maxZoom + 2).toDouble();
+        _offlineInitialZoom = maxZoom >= 15 ? 15.0 : maxZoom.toDouble();
+        _mapAttributionLabel = attribution;
         _useOnlineFallback = false;
         _isLoading = false;
       });
+      _moveToOfflineCenterIfNeeded();
     } catch (e) {
       debugPrint('从 assets 复制 MBTiles 失败: $e');
       // 复制失败，检查网络状态决定是否使用在线瓦片
       final connectivityResult = await Connectivity().checkConnectivity();
-      final hasNetwork = connectivityResult != ConnectivityResult.none;
+      final hasNetwork = connectivityResult.any(
+        (result) => result != ConnectivityResult.none,
+      );
 
       setState(() {
         _useOnlineFallback = hasNetwork;
+        _mapAttributionLabel = _buildOnlineAttribution();
         _isLoading = false;
       });
     }
+  }
+
+  String _buildOfflineAttribution(MbtilesReader reader) {
+    final rawAttribution = reader.attribution?.trim();
+    if (rawAttribution != null && rawAttribution.isNotEmpty) {
+      return rawAttribution;
+    }
+
+    final mapName = reader.name?.trim();
+    if (mapName != null && mapName.isNotEmpty) {
+      return '离线地图数据：$mapName';
+    }
+
+    return '离线地图数据：OpenStreetMap（OpenStreetMap contributors，ODbL）';
+  }
+
+  String _buildOnlineAttribution() {
+    return '在线底图：高德地图 | 数据参考：OpenStreetMap（OpenStreetMap contributors）';
+  }
+
+  void _moveToOfflineCenterIfNeeded() {
+    if (_currentPosition != null || _offlineMapCenter == null) {
+      return;
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _offlineMapCenter == null) {
+        return;
+      }
+
+      try {
+        _mapController.move(_offlineMapCenter!, _offlineInitialZoom);
+      } catch (e) {
+        debugPrint('移动到离线地图中心失败: $e');
+      }
+    });
   }
 
   @override
@@ -281,10 +354,12 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
             mapController: _mapController,
             options: MapOptions(
               initialCenter:
-                  _currentPosition ?? const LatLng(39.9042, 116.4074),
-              initialZoom: _currentPosition != null ? 15.0 : 13.0,
-              minZoom: 10.0,
-              maxZoom: _useOnlineFallback ? 19.0 : 18.0,
+                  _currentPosition ??
+                  _offlineMapCenter ??
+                  const LatLng(20.02, 110.35),
+              initialZoom: _currentPosition != null ? 15.0 : _offlineInitialZoom,
+              minZoom: _useOnlineFallback ? 3.0 : _offlineMinZoom,
+              maxZoom: _useOnlineFallback ? 19.0 : _offlineMaxZoom,
               interactionOptions: const InteractionOptions(
                 flags: InteractiveFlag.all,
               ),
@@ -298,7 +373,10 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
                   tileProvider: MbTilesTileProvider(filePath: _mapFilePath!),
                   urlTemplate: 'mbtiles://{z}/{x}/{y}',
                   zoomOffset: 0,
-                  maxZoom: 18,
+                  minZoom: _offlineMinZoom,
+                  maxZoom: _offlineMaxZoom,
+                  minNativeZoom: _offlineMinNativeZoom.toInt(),
+                  maxNativeZoom: _offlineMaxNativeZoom.toInt(),
                 ),
 
               // 当前位置标记
@@ -412,19 +490,35 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
 
           // 地图出处标注
           Positioned(
-            bottom: 8,
-            left: 8,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(4),
-              ),
-              child: Text(
-                _useOnlineFallback
-                    ? '© 高德地图 | © OpenStreetMap contributors'
-                    : '© 离线战术地图 | MBTiles',
-                style: const TextStyle(color: Colors.white70, fontSize: 9),
+            left: 10,
+            right: 10,
+            bottom: 10,
+            child: SafeArea(
+              minimum: const EdgeInsets.only(bottom: 2),
+              child: Align(
+                alignment: Alignment.bottomLeft,
+                child: Container(
+                  constraints: const BoxConstraints(maxWidth: 320),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.68),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    _useOnlineFallback
+                        ? _buildOnlineAttribution()
+                        : _mapAttributionLabel,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w500,
+                      height: 1.3,
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
@@ -490,24 +584,6 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w700,
                 color: RescuePalette.textPrimary,
-              ),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              '请维持雷达模式或检查网络连接',
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: RescuePalette.textMuted),
-            ),
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
-              child: Text(
-                '提示：将 tactical.mbtiles 放置于 assets/maps/ 目录以启用离线模式',
-                style: Theme.of(
-                  context,
-                ).textTheme.bodySmall?.copyWith(color: RescuePalette.textMuted),
-                textAlign: TextAlign.center,
               ),
             ),
           ],
