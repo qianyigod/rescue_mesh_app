@@ -10,24 +10,17 @@ const socketService = require('./socket');
 
 const app = express();
 const server = http.createServer(app);
-const corsOrigin = process.env.CORS_ORIGIN || '*';
 
 // Middleware
-app.use(cors({
-  origin: corsOrigin === '*' ? true : corsOrigin,
-}));
+app.use(cors());
 app.use(express.json());
 
 // Socket.io setup
 const io = new Server(server, {
   cors: {
-    origin: corsOrigin === '*' ? true : corsOrigin,
+    origin: '*',
     methods: ['GET', 'POST']
-  },
-  transports: ['websocket', 'polling'],
-  pingInterval: 25000,
-  pingTimeout: 60000,
-  connectTimeout: 45000,
+  }
 });
 
 // Initialize Socket.io
@@ -42,10 +35,7 @@ app.get('/health', (req, res) => {
 });
 
 // MongoDB connection
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGO_URI ||
-  'mongodb://localhost:27017/rescue_mesh';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/rescue_mesh';
 const PORT = process.env.PORT || 3000;
 
 mongoose.connect(MONGODB_URI)

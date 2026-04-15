@@ -15,13 +15,13 @@ enum BloodType {
   String get label {
     switch (this) {
       case BloodType.a:
-        return 'A 型';
+        return 'A型';
       case BloodType.b:
-        return 'B 型';
+        return 'B型';
       case BloodType.ab:
-        return 'AB 型';
+        return 'AB型';
       case BloodType.o:
-        return 'O 型';
+        return 'O型';
       case BloodType.unknown:
         return '未知';
     }

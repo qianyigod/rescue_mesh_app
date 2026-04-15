@@ -37,11 +37,10 @@ Future<void> main() async {
             callsign: profile.name.isNotEmpty
                 ? profile.name
                 : EmergencyProfile.current.callsign,
-            bloodType:
-                profile.bloodType >= 0 &&
-                    profile.bloodType < BloodType.values.length
-                ? BloodType.values[profile.bloodType]
-                : BloodType.unknown,
+            bloodType: BloodType.values.firstWhere(
+              (type) => type.code == profile.bloodType,
+              orElse: () => BloodType.unknown,
+            ),
             allergies: profile.allergies,
             emergencyContact: profile.emergencyContact,
           );

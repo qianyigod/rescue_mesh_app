@@ -36,31 +36,33 @@ async function chatCompletion(messages) {
 }
 
 async function generateSituationReport(data) {
-  const prompt = `你是应急救援指挥中心分析助手。请根据以下实时数据，生成简洁、专业的中文态势摘要。
-
-概览:
-- 求救点总数: ${data.total}
-- 危重人数: ${data.criticalCount}
-- 紧急人数: ${data.urgentCount}
-- 血型分布: ${JSON.stringify(data.bloodDistribution)}
-
-省份分布:
-${(data.provinceDistribution || []).map((p) => `- ${p.name}: ${p.count} 例`).join('\n')}
-
-等待最久:
-${(data.longestWaiting || [])
-  .map((w) => `- 等待 ${w.elapsedMin} 分钟 | 等级 ${w.severityLevel} | 病史 ${w.medicalHistory || '无'}`)
-  .join('\n')}
-
-最高优先级:
-${(data.topPriorities || [])
-  .map((p, i) => `- #${i + 1} | 分数 ${p.score} | 等级 ${p.severityLevel} | 病史 ${p.medicalHistory || '无'}`)
-  .join('\n')}
-
-要求:
-1. 用中文输出。
-2. 先写整体态势，再写重点风险，最后写行动建议。
-3. 内容简洁，不空泛。`;
+  const prompt = [
+    '你是应急救援指挥中心分析助手。请基于以下实时数据，生成简洁、专业的中文态势摘要。',
+    '',
+    '概览:',
+    `- 求救点总数: ${data.total}`,
+    `- 危重人数: ${data.criticalCount}`,
+    `- 紧急人数: ${data.urgentCount}`,
+    `- 血型分布: ${JSON.stringify(data.bloodDistribution || {})}`,
+    '',
+    '省份分布:',
+    (data.provinceDistribution || []).map((p) => `- ${p.name}: ${p.count} 例`).join('\n') || '- 无',
+    '',
+    '等待最长:',
+    (data.longestWaiting || [])
+      .map((w) => `- 等待 ${w.elapsedMin} 分钟 | 等级 ${w.severityLevel} | 病史 ${w.medicalHistory || '无'}`)
+      .join('\n') || '- 无',
+    '',
+    '最高优先级:',
+    (data.topPriorities || [])
+      .map((p, i) => `- #${i + 1} | 分数 ${p.score} | 等级 ${p.severityLevel} | 病史 ${p.medicalHistory || '无'}`)
+      .join('\n') || '- 无',
+    '',
+    '要求:',
+    '1. 用中文输出。',
+    '2. 先写整体态势，再写重点风险，最后写行动建议。',
+    '3. 内容简洁，不空泛。',
+  ].join('\n');
 
   return chatCompletion([
     {
@@ -85,7 +87,7 @@ function formatCase(item, index) {
     `过敏: ${item.allergies || '无'}`,
     `紧急联系人: ${item.emergencyContact || '无'}`,
     `坐标: ${item.locationText || '未知'}`,
-    item.province ? `归属省份: ${item.province}` : null,
+    item.province ? `所属省份: ${item.province}` : null,
     item.addressText ? `地址概述: ${item.addressText}` : null,
     item.nearbyLandmark ? `附近地标: ${item.nearbyLandmark}` : null,
     item.formattedAddress ? `详细地址: ${item.formattedAddress}` : null,
@@ -104,10 +106,28 @@ function formatPlan(plan) {
     `优先级: ${plan.priorityScore} (${plan.severityLevel})`,
     `位置: ${plan.address || '未知'}`,
     route
-      ? `推荐路线: 前往${route.toHospital}，距离${route.distanceKm}km，预计${route.estimatedTimeMinutes}分钟，过路费${route.tolls}`
+      ? `推荐路线: 前往${route.toHospital}，距离${route.distanceKm}km，预计${route.estimatedTimeMinutes}分钟`
       : '推荐路线: 无',
     plan.dispatchHint ? `调度提示: ${plan.dispatchHint}` : null,
     hospitals ? `候选医院: ${hospitals}` : null,
+  ].filter(Boolean).join(' | ');
+}
+
+function formatRescuePlan(plan) {
+  const route = plan.routeSummary;
+  const teams = (plan.recommendedRescueTeams || [])
+    .map((team) => `${team.name}(${team.distanceKm}km, 约${team.estimatedTimeMinutes}分钟)`)
+    .join('；');
+
+  return [
+    `- 救援对象: ${plan.name || '未登记'} / ${plan.mac}`,
+    `优先级: ${plan.priorityScore} (${plan.severityLevel})`,
+    `位置: ${plan.address || '未知'}`,
+    route
+      ? `推荐救援队: ${route.fromTeam}，距离${route.distanceKm}km，预计${route.estimatedTimeMinutes}分钟`
+      : '推荐救援队: 无',
+    plan.dispatchHint ? `调度提示: ${plan.dispatchHint}` : null,
+    teams ? `候选救援队: ${teams}` : null,
   ].filter(Boolean).join(' | ');
 }
 
@@ -116,6 +136,7 @@ function formatChatContext(contextData = {}) {
   const allCases = Array.isArray(contextData.allCases) ? contextData.allCases : [];
   const rankedCases = Array.isArray(contextData.rankedCases) ? contextData.rankedCases : [];
   const generatedPlans = Array.isArray(contextData.generatedPlans) ? contextData.generatedPlans : [];
+  const generatedRescuePlans = Array.isArray(contextData.generatedRescuePlans) ? contextData.generatedRescuePlans : [];
   const intent = contextData.intent || 'general';
 
   const sections = [
@@ -137,8 +158,13 @@ function formatChatContext(contextData = {}) {
   }
 
   if (generatedPlans.length > 0) {
-    sections.push('## 自动生成的路线规划');
+    sections.push('## 自动生成的医院路线规划');
     sections.push(generatedPlans.map(formatPlan).join('\n'));
+  }
+
+  if (generatedRescuePlans.length > 0) {
+    sections.push('## 自动生成的救援队调度');
+    sections.push(generatedRescuePlans.map(formatRescuePlan).join('\n'));
   }
 
   return sections.join('\n');
@@ -150,7 +176,7 @@ function buildFriendlyRouteSteps(route) {
     return Array.isArray(route?.keySteps) ? route.keySteps.slice(0, 6) : [];
   }
 
-  return fullSteps.slice(0, 6).map((step, index) => formatDrivingStep(step, index, fullSteps.length));
+  return fullSteps.slice(0, 6).map((step, index, steps) => formatDrivingStep(step, index, steps.length));
 }
 
 function formatDrivingStep(step, index, totalSteps) {
@@ -219,8 +245,60 @@ function buildRouteAnswer(question, contextData = {}) {
   ].join('\n');
 }
 
+function buildRescueDispatchAnswer(question, contextData = {}) {
+  const generatedPlans = Array.isArray(contextData.generatedRescuePlans) ? contextData.generatedRescuePlans : [];
+  if (generatedPlans.length === 0) {
+    return '未识别到对应的求救对象。';
+  }
+
+  const plan = generatedPlans[0];
+  const route = plan.routeSummary;
+  const topTeam = (plan.recommendedRescueTeams || [])[0] || null;
+  const target = plan.name ? `${plan.name} / ${plan.mac}` : plan.mac;
+  const wantsDetailedRoute = /路线|怎么走|如何走|怎么去|过去|导航|步骤/.test(String(question || ''));
+
+  if (route) {
+    const lines = [
+      `对象: ${target}`,
+      `最近救援队: ${route.fromTeam}`,
+      `路线: ${route.distanceKm} km，约 ${route.estimatedTimeMinutes} 分钟`,
+      plan.address ? `位置: ${plan.address}` : null,
+      plan.dispatchHint ? `调度提示: ${plan.dispatchHint}` : null,
+    ].filter(Boolean);
+
+    if (wantsDetailedRoute) {
+      lines.push('导航步骤:');
+      buildFriendlyRouteSteps(route).forEach((step, index) => {
+        lines.push(`${index + 1}. ${step}`);
+      });
+    }
+
+    return lines.join('\n');
+  }
+
+  if (topTeam) {
+    return [
+      `对象: ${target}`,
+      `已找到救援队候选: ${topTeam.name}`,
+      `估计距离: ${topTeam.distanceKm} km，约 ${topTeam.estimatedTimeMinutes} 分钟`,
+      '路线规划失败。',
+    ].join('\n');
+  }
+
+  return [
+    `对象: ${target}`,
+    '没有匹配的救援队。',
+  ].join('\n');
+}
+
 async function answerQuestion(question, contextData) {
-  if ((contextData?.intent || 'general') === 'route_plan') {
+  const intent = contextData?.intent || 'general';
+
+  if (intent === 'rescue_dispatch') {
+    return buildRescueDispatchAnswer(question, contextData);
+  }
+
+  if (intent === 'route_plan') {
     return buildRouteAnswer(question, contextData);
   }
 
@@ -234,9 +312,10 @@ async function answerQuestion(question, contextData) {
         + '\n要求:'
         + '\n1. 只能依据上下文中的事实回答，不要编造未提供的信息。'
         + '\n2. 优先直接回答用户提问的核心问题。'
-        + '\n3. 可以补充与该问题直接相关、能帮助指挥决策的少量额外信息。'
-        + '\n4. 如果无法从上下文确认答案，只输出“无法确认。”'
-        + '\n5. 只有路线规划问题才需要严格依赖后端规划结果；其它分析、归纳、比较问题可以基于全部求救信息自行组织答案。',
+        + '\n3. 可以补充与问题直接相关、能帮助指挥决策的少量额外信息。'
+        + '\n4. 如果无法从上下文确认答案，只输出“无法确认”。'
+        + '\n5. 医院路线规划和救援队路线规划必须依赖后端已生成的规划结果。'
+        + '\n6. 其它分析、归纳、比较问题可以基于全部求救信息自行组织答案。',
     },
     {
       role: 'user',

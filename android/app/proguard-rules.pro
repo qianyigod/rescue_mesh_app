@@ -13,4 +13,4 @@
 -keep class io.flutter.plugins.**  { *; }
 
 # Keep model classes for Drift/SQLite
--keep class com.example.rescue_mesh_app.** { *; }
+-keep class cn.rescuemesh.app.** { *; }

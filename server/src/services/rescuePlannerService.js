@@ -3,7 +3,13 @@
  * 综合地理编码、路径规划、医疗信息，生成完整的救援方案
  */
 
-const { reverseGeocode, searchNearbyHospitalsWithAMap, searchHospitalsByKeywordWithAMap } = require('./geocodingService');
+const {
+  reverseGeocode,
+  searchNearbyHospitalsWithAMap,
+  searchHospitalsByKeywordWithAMap,
+  searchNearbyRescueTeamsWithAMap,
+  searchRescueTeamsByKeywordWithAMap,
+} = require('./geocodingService');
 const { calculateRoute, batchCalculateRoutes, calculateStraightDistance } = require('./routingService');
 const { rankSosList } = require('../utils/priorityEngine');
 
@@ -17,6 +23,7 @@ const { rankSosList } = require('../utils/priorityEngine');
  * 建议：根据实际部署地区修改为当地主要医院
  */
 const DEFAULT_HOSPITALS = [];
+const DEFAULT_RESCUE_TEAMS = [];
 
 /**
  * 【可选】最大并发路径计算数
@@ -252,6 +259,137 @@ async function generateSingleRescuePlan(sosRecord, hospitals = null, options = {
  * @param {string} [options.optimizationStrategy='efficiency'] - 优化策略 ('efficiency' | 'urgency' | 'distance')
  * @returns {Promise<Object>} 优化后的救援序列
  */
+async function generateNearestRescueTeamPlan(sosRecord, rescueTeams = null, options = {}) {
+  const startTime = Date.now();
+  const {
+    includeFullSteps = true,
+    maxNearbyTeams = 3,
+  } = options;
+
+  const [lng, lat] = sosRecord.location.coordinates;
+
+  try {
+    let addressInfo = null;
+    try {
+      addressInfo = await reverseGeocode(lng, lat);
+    } catch (err) {
+      console.warn(`[RescuePlanner] rescue-team reverse geocode failed: ${err.message}`);
+      addressInfo = {
+        formattedAddress: '',
+        addressComponent: {},
+        pois: [],
+      };
+    }
+
+    const teamList = prioritizeRescueTeams(
+      rescueTeams || await resolveCandidateRescueTeamsAdaptive(lng, lat, addressInfo, DEFAULT_RESCUE_TEAMS),
+      sosRecord,
+    );
+
+    const teamRoutes = [];
+    for (const team of teamList) {
+      try {
+        const route = await calculateRoute(team.lng, team.lat, lng, lat, { strategy: '0' });
+        teamRoutes.push({
+          ...team,
+          rescueScore: getRescueTeamScore(team?.name || '', team?.type || '', sosRecord),
+          strongSignal: hasStrongRescueSignal(team?.name || '', team?.type || ''),
+          distance: route.distance,
+          duration: route.duration,
+          route: includeFullSteps ? route : {
+            distance: route.distance,
+            duration: route.duration,
+            tolls: route.tolls,
+            overview: route.overview,
+          },
+        });
+      } catch (err) {
+        const straightDist = calculateStraightDistance(team.lng, team.lat, lng, lat);
+        teamRoutes.push({
+          ...team,
+          rescueScore: getRescueTeamScore(team?.name || '', team?.type || '', sosRecord),
+          strongSignal: hasStrongRescueSignal(team?.name || '', team?.type || ''),
+          distance: straightDist,
+          duration: Math.round(straightDist / 500 * 60),
+          error: err.message,
+        });
+      }
+    }
+
+    teamRoutes.sort(compareRescueTeamsForDispatch);
+    const nearestTeam = teamRoutes[0];
+    const medicalProfile = sosRecord.medicalProfile || {};
+
+    return {
+      senderMac: sosRecord.senderMac,
+      generatedAt: new Date().toISOString(),
+      priority: sosRecord.priority || {
+        score: 0,
+        severityLevel: 'unknown',
+        elapsedMin: 0,
+        breakdown: [],
+      },
+      location: {
+        coordinates: [lng, lat],
+        address: addressInfo.formattedAddress,
+        detailed: addressInfo.addressComponent,
+        nearbyLandmarks: addressInfo.pois || [],
+      },
+      medical: {
+        bloodType: sosRecord.bloodType,
+        bloodTypeName: getBloodTypeName(sosRecord.bloodType),
+        profile: medicalProfile,
+      },
+      route: nearestTeam?.route ? {
+        fromTeam: nearestTeam.name,
+        sourceCoordinates: [nearestTeam.lng, nearestTeam.lat],
+        destinationCoordinates: [lng, lat],
+        sourceMeta: {
+          name: nearestTeam.name,
+          address: nearestTeam.address || '',
+          type: nearestTeam.type || '',
+          source: nearestTeam.source || '',
+        },
+        destinationMeta: {
+          name: medicalProfile.name || sosRecord.senderMac,
+          address: addressInfo.formattedAddress || '',
+          type: 'victim',
+          source: 'sos_record',
+        },
+        distanceMeters: nearestTeam.route.distance,
+        distanceKm: (nearestTeam.route.distance / 1000).toFixed(2),
+        estimatedTimeSeconds: nearestTeam.route.duration,
+        estimatedTimeMinutes: Math.ceil(nearestTeam.route.duration / 60),
+        tolls: nearestTeam.route.tolls,
+        trafficLights: nearestTeam.route.trafficLights,
+        keySteps: (nearestTeam.route.steps || []).slice(0, 5).map((s) => s.instruction),
+        fullSteps: includeFullSteps ? nearestTeam.route.steps : undefined,
+      } : null,
+      recommendedRescueTeams: teamRoutes.slice(0, maxNearbyTeams).map((team) => ({
+        name: team.name,
+        location: [team.lng, team.lat],
+        address: team.address || '',
+        type: team.type || '',
+        source: team.source || '',
+        distanceMeters: team.distance,
+        distanceKm: (team.distance / 1000).toFixed(2),
+        estimatedTimeMinutes: Math.ceil(team.duration / 60),
+        rescueScore: team.rescueScore,
+        strongSignal: !!team.strongSignal,
+        hasError: !!team.error,
+      })),
+      dispatchRecommendations: buildRescueDispatchRecommendations(sosRecord, nearestTeam, addressInfo),
+      metadata: {
+        generationTimeMs: Date.now() - startTime,
+        provider: addressInfo.provider || 'unknown',
+      },
+    };
+  } catch (err) {
+    console.error('[RescuePlanner] rescue team plan failed:', err);
+    throw new Error(`rescue team plan failed: ${err.message}`);
+  }
+}
+
 async function optimizeBatchRescue(sosRecords, origin, options = {}) {
   const startTime = Date.now();
   
@@ -992,6 +1130,211 @@ function compareHospitalsForDispatch(a, b) {
   return aDistance - bDistance;
 }
 
+function isUsableRescueTeamCandidate(poi = {}) {
+  const text = `${String(poi?.name || '').trim()} ${String(poi?.type || '').trim()}`;
+  if (!text.trim()) {
+    return false;
+  }
+
+  if (/美容|宠物|汽修|洗车|汽车维修|汽车救援|拖车|轮胎|保养|口腔门诊|诊所|药店|体检|健康管理/.test(text)) {
+    return false;
+  }
+
+  return /120急救中心|急救中心|急救站|消防救援站|消防站|派出所|公安局|应急救援|医院急诊|急诊科/.test(text);
+}
+
+function normalizeRescueTeamCandidate(poi, source = 'search_api') {
+  const location = Array.isArray(poi?.location) ? poi.location : [];
+  const lng = Number(location[0] ?? poi?.lng);
+  const lat = Number(location[1] ?? poi?.lat);
+  const name = String(poi?.name || '').trim();
+
+  if (!Number.isFinite(lng) || !Number.isFinite(lat) || !name) {
+    return null;
+  }
+
+  return {
+    name,
+    lng,
+    lat,
+    source,
+    approxDistance: poi?.distance ?? poi?.approxDistance ?? null,
+    address: poi?.address || '',
+    type: poi?.type || '',
+  };
+}
+
+function hasStrongRescueSignal(name, type = '') {
+  const text = `${String(name || '').trim()} ${String(type || '').trim()}`;
+  return /120急救中心|急救中心|急救站|消防救援站|消防站|派出所|公安局/.test(text);
+}
+
+function getRescueTeamScore(name, type = '', sosRecord = {}) {
+  const text = `${String(name || '').trim()} ${String(type || '').trim()}`;
+  if (!text.trim() || !isUsableRescueTeamCandidate({ name, type })) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = 0;
+  if (/120急救中心|急救中心|急救站/.test(text)) score += 240;
+  if (/消防救援站|消防站/.test(text)) score += 220;
+  if (/派出所|公安局/.test(text)) score += 180;
+  if (/应急救援/.test(text)) score += 160;
+  if (/医院急诊|急诊科/.test(text)) score += 130;
+  if (/三级甲等医院|三级医院/.test(text)) score += 60;
+
+  const severity = sosRecord?.priority?.severityLevel || '';
+  if (severity === 'critical' && /120急救中心|急救中心|急救站|医院急诊|急诊科/.test(text)) {
+    score += 70;
+  }
+  if (severity === 'critical' && /消防救援站|消防站/.test(text)) {
+    score += 35;
+  }
+
+  return score;
+}
+
+function compareRescueTeamsForDispatch(a, b) {
+  const aStrong = !!a?.strongSignal;
+  const bStrong = !!b?.strongSignal;
+  const aScore = Number.isFinite(a?.rescueScore) ? a.rescueScore : Number.NEGATIVE_INFINITY;
+  const bScore = Number.isFinite(b?.rescueScore) ? b.rescueScore : Number.NEGATIVE_INFINITY;
+  const aHasError = !!a?.error;
+  const bHasError = !!b?.error;
+  const aDistance = a?.distance ?? a?.approxDistance ?? Infinity;
+  const bDistance = b?.distance ?? b?.approxDistance ?? Infinity;
+
+  if (aStrong !== bStrong) {
+    return Number(bStrong) - Number(aStrong);
+  }
+  if (aScore !== bScore) {
+    return bScore - aScore;
+  }
+  if (aHasError !== bHasError) {
+    return Number(aHasError) - Number(bHasError);
+  }
+  return aDistance - bDistance;
+}
+
+function prioritizeRescueTeams(teams, sosRecord) {
+  return [...(Array.isArray(teams) ? teams : [])]
+    .map((team) => ({
+      ...team,
+      rescueScore: getRescueTeamScore(team?.name || '', team?.type || '', sosRecord),
+      strongSignal: hasStrongRescueSignal(team?.name || '', team?.type || ''),
+    }))
+    .filter((team) => Number.isFinite(team.rescueScore) && team.rescueScore > 0)
+    .sort(compareRescueTeamsForDispatch);
+}
+
+function mergeRescueTeamCandidates(primaryTeams = [], fallbackTeams = []) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const team of [...primaryTeams, ...fallbackTeams]) {
+    if (!team || typeof team.lng !== 'number' || typeof team.lat !== 'number') {
+      continue;
+    }
+    const key = `${team.name || ''}:${team.lng.toFixed(5)},${team.lat.toFixed(5)}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(team);
+  }
+
+  return merged;
+}
+
+async function resolveCandidateRescueTeamsAdaptive(lng, lat, addressInfo, fallbackTeams = []) {
+  const searchPlans = [
+    {
+      keywords: [
+        '\u0031\u0032\u0030\u6025\u6551\u4e2d\u5fc3',
+        '\u6025\u6551\u4e2d\u5fc3',
+        '\u6025\u6551\u7ad9',
+        '\u6d88\u9632\u6551\u63f4\u7ad9',
+        '\u6d88\u9632\u7ad9',
+        '\u6d3e\u51fa\u6240',
+        '\u516c\u5b89\u5c40',
+      ],
+      radii: [10000, 30000, 50000],
+    },
+    {
+      keywords: [
+        '\u5e94\u6025\u6551\u63f4',
+        '\u533b\u9662\u6025\u8bca',
+      ],
+      radii: [10000, 30000, 50000],
+    },
+  ];
+
+  let nearbyTeams = [];
+  for (const plan of searchPlans) {
+    for (const radius of plan.radii) {
+      try {
+        const result = await searchNearbyRescueTeamsWithAMap(lng, lat, {
+          radius,
+          pageSize: 20,
+          keywords: plan.keywords,
+        });
+
+        const normalized = result
+          .filter((poi) => isUsableRescueTeamCandidate(poi))
+          .map((poi) => normalizeRescueTeamCandidate(poi, 'nearby_api'))
+          .filter(Boolean);
+
+        nearbyTeams = mergeRescueTeamCandidates(nearbyTeams, normalized);
+        if (nearbyTeams.length >= 6) {
+          break;
+        }
+      } catch (err) {
+        console.warn(`[RescuePlanner] nearby rescue team search failed (${radius}m): ${err.message}`);
+      }
+    }
+    if (nearbyTeams.length >= 6) {
+      break;
+    }
+  }
+
+  let keywordTeams = [];
+  try {
+    const result = await searchRescueTeamsByKeywordWithAMap(lng, lat, {
+      district: addressInfo?.addressComponent?.district || '',
+      city: addressInfo?.addressComponent?.city || addressInfo?.addressComponent?.province || '',
+      pageSize: 10,
+      maxPages: 2,
+      maxDistanceMeters: 50000,
+    });
+    keywordTeams = result
+      .filter((poi) => isUsableRescueTeamCandidate(poi))
+      .map((poi) => normalizeRescueTeamCandidate(poi, 'search_api'))
+      .filter(Boolean);
+  } catch (err) {
+    console.warn(`[RescuePlanner] keyword rescue team search failed: ${err.message}`);
+  }
+
+  const sanitizedFallbacks = (Array.isArray(fallbackTeams) ? fallbackTeams : [])
+    .map((team) => normalizeRescueTeamCandidate(team, 'manual'))
+    .filter(Boolean);
+
+  return mergeRescueTeamCandidates(nearbyTeams, [...keywordTeams, ...sanitizedFallbacks]);
+}
+
+function buildRescueDispatchRecommendations(sosRecord, nearestTeam, addressInfo) {
+  const lines = [];
+  if (nearestTeam?.name) {
+    lines.push(`优先由${nearestTeam.name}赶赴现场。`);
+  }
+  if (addressInfo?.formattedAddress) {
+    lines.push(`目标位置：${addressInfo.formattedAddress}。`);
+  }
+  if ((sosRecord?.priority?.severityLevel || '') === 'critical') {
+    lines.push('当前对象为 critical，建议立即出动并同步上报指挥席。');
+  }
+  return lines;
+}
+
 function generateBatchSummary(sequence) {
   const severityCounts = {
     critical: 0,
@@ -1017,6 +1360,7 @@ function generateBatchSummary(sequence) {
 
 module.exports = {
   generateSingleRescuePlan,
+  generateNearestRescueTeamPlan,
   optimizeBatchRescue,
   generateAiRecommendations,
   getBloodTypeName,

@@ -387,6 +387,164 @@ async function searchHospitalsByKeywordWithAMap(lng, lat, options = {}) {
   return mergedPois;
 }
 
+async function searchNearbyRescueTeamsWithAMap(lng, lat, options = {}) {
+  const {
+    radius = 10000,
+    pageSize = 20,
+    keywords = [
+      '\u0031\u0032\u0030\u6025\u6551\u4e2d\u5fc3',
+      '\u6025\u6551\u4e2d\u5fc3',
+      '\u6025\u6551\u7ad9',
+      '\u6d88\u9632\u6551\u63f4\u7ad9',
+      '\u6d88\u9632\u7ad9',
+      '\u6d3e\u51fa\u6240',
+      '\u516c\u5b89\u5c40',
+      '\u5e94\u6025\u6551\u63f4',
+      '\u533b\u9662\u6025\u8bca',
+    ],
+  } = options;
+
+  const normalizedKeywords = normalizeAmapKeywords(keywords);
+  const queryKeywords = normalizedKeywords.length > 0 ? normalizedKeywords : ['\u6025\u6551\u4e2d\u5fc3'];
+  const normalizedRadius = Math.min(Math.max(parseInt(radius, 10) || 10000, 1000), 50000);
+  const cacheKey = `rescue-team:amap:${lng.toFixed(6)},${lat.toFixed(6)}:${normalizedRadius}:${pageSize}:${queryKeywords.join('|')}`;
+  const cached = await getCachedAddress(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (AMAP_API_KEY === 'YOUR_AMAP_API_KEY_HERE') {
+    throw new Error('AMAP_API_KEY is not configured');
+  }
+
+  const [gcjLng, gcjLat] = wgs84ToGcj02(lng, lat);
+  const baseUrl = 'https://restapi.amap.com/v3/place/around';
+  const allPois = [];
+  const seen = new Set();
+
+  for (const keyword of queryKeywords) {
+    const params = new URLSearchParams({
+      key: AMAP_API_KEY,
+      location: `${gcjLng},${gcjLat}`,
+      radius: String(normalizedRadius),
+      keywords: keyword,
+      sortrule: 'distance',
+      offset: String(pageSize),
+      page: '1',
+      extensions: 'all',
+    });
+
+    const response = await fetch(`${baseUrl}?${params}`);
+    const data = await response.json();
+
+    if (data.status !== '1') {
+      throw new Error(`AMap rescue team around search failed (${data.infocode}): ${data.info}`);
+    }
+
+    const pois = (data.pois || []).map(mapAmapPoiToWgs).filter(Boolean);
+    for (const poi of pois) {
+      const key = `${poi.id || poi.name}:${poi.location[0]},${poi.location[1]}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      allPois.push(poi);
+    }
+  }
+
+  const mergedPois = allPois.sort((a, b) => (a.distance || Infinity) - (b.distance || Infinity)).slice(0, pageSize);
+  await setCachedAddress(cacheKey, mergedPois);
+  return mergedPois;
+}
+
+async function searchRescueTeamsByKeywordWithAMap(lng, lat, options = {}) {
+  const {
+    city = '',
+    district = '',
+    pageSize = 10,
+    maxPages = 2,
+    maxDistanceMeters = 50000,
+    maxResults = 12,
+    keywords = [
+      '\u0031\u0032\u0030\u6025\u6551\u4e2d\u5fc3',
+      '\u6025\u6551\u4e2d\u5fc3',
+      '\u6025\u6551\u7ad9',
+      '\u6d88\u9632\u6551\u63f4\u7ad9',
+      '\u6d88\u9632\u7ad9',
+      '\u6d3e\u51fa\u6240',
+      '\u516c\u5b89\u5c40',
+      '\u5e94\u6025\u6551\u63f4',
+      '\u533b\u9662\u6025\u8bca',
+    ],
+  } = options;
+
+  const queryKeywords = normalizeAmapKeywords(keywords);
+  const cityHints = [district, city].map((item) => String(item || '').trim()).filter(Boolean);
+  const cacheKey = `rescue-team:text:${lng.toFixed(6)},${lat.toFixed(6)}:${cityHints.join('|')}:${pageSize}:${maxPages}:${maxDistanceMeters}:${queryKeywords.join('|')}`;
+  const cached = await getCachedAddress(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  if (AMAP_API_KEY === 'YOUR_AMAP_API_KEY_HERE') {
+    throw new Error('AMAP_API_KEY is not configured');
+  }
+
+  const baseUrl = 'https://restapi.amap.com/v3/place/text';
+  const allPois = [];
+  const seen = new Set();
+
+  outer:
+  for (const keyword of queryKeywords) {
+    for (const cityHint of (cityHints.length > 0 ? cityHints : [''])) {
+      for (let page = 1; page <= maxPages; page += 1) {
+        const params = new URLSearchParams({
+          key: AMAP_API_KEY,
+          keywords: keyword,
+          city: cityHint,
+          citylimit: cityHint ? 'true' : 'false',
+          offset: String(pageSize),
+          page: String(page),
+          extensions: 'all',
+        });
+
+        const response = await fetch(`${baseUrl}?${params}`);
+        const data = await response.json();
+        if (data.status !== '1') {
+          throw new Error(`AMap rescue team text search failed (${data.infocode}): ${data.info}`);
+        }
+
+        const pois = (data.pois || [])
+          .map(mapAmapPoiToWgs)
+          .filter(Boolean)
+          .map((poi) => ({
+            ...poi,
+            approxDistance: Math.round(Math.sqrt(((poi.location[0] - lng) * 111320 * Math.cos(lat * Math.PI / 180)) ** 2 + ((poi.location[1] - lat) * 110540) ** 2)),
+          }))
+          .filter((poi) => !Number.isFinite(maxDistanceMeters) || poi.approxDistance <= maxDistanceMeters);
+
+        for (const poi of pois) {
+          const key = `${poi.id || poi.name}:${poi.location[0]},${poi.location[1]}`;
+          if (seen.has(key)) {
+            continue;
+          }
+          seen.add(key);
+          allPois.push(poi);
+          if (allPois.length >= maxResults) {
+            break outer;
+          }
+        }
+      }
+    }
+  }
+
+  const mergedPois = allPois
+    .sort((a, b) => (a.approxDistance || Infinity) - (b.approxDistance || Infinity))
+    .slice(0, maxResults);
+  await setCachedAddress(cacheKey, mergedPois);
+  return mergedPois;
+}
+
 /**
  * 使用百度地图进行逆地理编码（备用方案）
  * @param {number} lng - 经度
@@ -534,4 +692,6 @@ module.exports = {
   reverseGeocodeWithBaidu,
   searchNearbyHospitalsWithAMap,
   searchHospitalsByKeywordWithAMap,
+  searchNearbyRescueTeamsWithAMap,
+  searchRescueTeamsByKeywordWithAMap,
 };

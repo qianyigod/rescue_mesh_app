@@ -509,10 +509,141 @@ function rebuildRouteOverlay(detail, options = {}) {
   }
 }
 
+function getRouteEndpointBadge(type, fallbackKind) {
+  if (type === 'rescue_team') return '\u6551'
+  if (type === 'victim') return 'SOS'
+  if (type === 'hospital') return '\u533b'
+  return fallbackKind === 'start' ? 'SOS' : '\u533b'
+}
+
+function getRouteEndpointTitle(type, fallbackKind) {
+  if (type === 'rescue_team') return '\u6551\u63f4\u961f'
+  if (type === 'victim') return '\u6c42\u6551\u70b9'
+  if (type === 'hospital') return '\u76ee\u7684\u533b\u9662'
+  return fallbackKind === 'start' ? '\u6c42\u6551\u70b9' : '\u76ee\u7684\u533b\u9662'
+}
+
+function makeTypedEndpointMarker(kind, label, position, type) {
+  return new AMapLib.Marker({
+    position,
+    anchor: 'center',
+    offset: new AMapLib.Pixel(-18, -17),
+    zIndex: 1200,
+    content: `<div class="route-endpoint ${kind}">
+      <div class="route-endpoint-badge">${getRouteEndpointBadge(type, kind)}</div>
+      <div class="route-endpoint-label">${label}</div>
+    </div>`,
+  })
+}
+
+function renderRouteOverlay(detail, options = {}) {
+  if (!map || !detail?.route) return
+  const { focusBounds = true } = options
+
+  currentRouteState.value = detail
+  setHeatmapRouteMode(true)
+  clearAllRouteOverlays()
+
+  const routePoints = decodeRoutePolyline(detail.route)
+  if (routePoints.length < 2) return
+
+  const shadow = addOverlay(new AMapLib.Polyline({
+    path: routePoints,
+    strokeColor: '#031623',
+    strokeWeight: 12,
+    lineCap: 'round',
+    lineJoin: 'round',
+    zIndex: 800,
+  }))
+
+  const line = addOverlay(new AMapLib.Polyline({
+    path: routePoints,
+    strokeColor: '#23e7ff',
+    strokeWeight: 6,
+    lineCap: 'round',
+    lineJoin: 'round',
+    zIndex: 900,
+  }))
+
+  const startCoords = toGcjPoint(detail.route.sourceCoordinates) || routePoints[0]
+  const endCoords = toGcjPoint(detail.route.destinationCoordinates) || routePoints[routePoints.length - 1]
+  const routeStart = routePoints[0]
+  const routeEnd = routePoints[routePoints.length - 1]
+
+  const startLabel = detail.startName || detail.name || detail.mac || getRouteEndpointTitle(detail.startType, 'start')
+  const startTitle = getRouteEndpointTitle(detail.startType, 'start')
+  const startAddress = detail.route?.sourceMeta?.address || ''
+  const startMarker = makeTypedEndpointMarker('start', startLabel, startCoords, detail.startType)
+  startMarker.on('click', () => {
+    toggleInfoWindow(
+      `route-start:${detail.startName || detail.mac || detail.name || 'unknown'}`,
+      startCoords,
+      `<div class="sos-popup route-popup"><div class="p-title">${startTitle}</div><div class="p-row"><span>${startLabel}</span><span>${startAddress}</span></div></div>`,
+    )
+  })
+  addOverlay(startMarker)
+
+  const endLabel = detail.endName || detail.hospitalName || getRouteEndpointTitle(detail.endType, 'end')
+  const endTitle = getRouteEndpointTitle(detail.endType, 'end')
+  const endAddress = detail.route?.destinationMeta?.address || ''
+  const endMarker = makeTypedEndpointMarker('end', endLabel, endCoords, detail.endType)
+  endMarker.on('click', () => {
+    const distanceRow = `${detail.route.distanceKm || ''} km`
+    const addressRow = endAddress
+      ? `<div class="p-row"><span>\u5730\u5740</span><span>${endAddress}</span></div>`
+      : ''
+    toggleInfoWindow(
+      `route-end:${detail.endName || detail.hospitalName || 'target'}:${detail.route.distanceKm || ''}`,
+      endCoords,
+      `<div class="sos-popup route-popup"><div class="p-title">${endTitle}</div><div class="p-row"><span>${endLabel}</span><span>${distanceRow}</span></div>${addressRow}</div>`,
+    )
+  })
+  addOverlay(endMarker)
+
+  if (calcMeters(startCoords, routeStart) > 20) {
+    addOverlay(new AMapLib.Polyline({
+      path: [startCoords, routeStart],
+      strokeColor: '#00f0b8',
+      strokeWeight: 2,
+      strokeStyle: 'dashed',
+      lineDash: [6, 6],
+      zIndex: 850,
+    }))
+    addOverlay(makeAnchorMarker('start', routeStart))
+  }
+
+  if (calcMeters(routeEnd, endCoords) > 20) {
+    addOverlay(new AMapLib.Polyline({
+      path: [routeEnd, endCoords],
+      strokeColor: '#ffd966',
+      strokeWeight: 2,
+      strokeStyle: 'dashed',
+      lineDash: [6, 6],
+      zIndex: 850,
+    }))
+    addOverlay(makeAnchorMarker('end', routeEnd))
+  }
+
+  const steps = Array.isArray(detail.route?.fullSteps) ? detail.route.fullSteps.slice(0, 6) : []
+  steps.forEach((step, index) => {
+    const stepPoints = decodeStepPolyline(step)
+    if (!stepPoints.length) return
+    addOverlay(makeTurnMarker(index, activeRouteStepIndex.value === index, stepPoints[stepPoints.length - 1], step))
+  })
+
+  if (focusBounds) {
+    fitView([shadow, line], getRouteFocusOptions(detail.route))
+  }
+
+  if (activeRouteStepIndex.value >= 0) {
+    highlightRouteStep(activeRouteStepIndex.value, { fly: false, rerender: false })
+  }
+}
+
 function showRouteOverlay(detail) {
   if (!detail?.route) return
   activeRouteStepIndex.value = -1
-  rebuildRouteOverlay(detail)
+  renderRouteOverlay(detail)
 }
 
 function highlightRouteStep(stepIndex, options = {}) {
@@ -520,14 +651,14 @@ function highlightRouteStep(stepIndex, options = {}) {
   const steps = Array.isArray(detail?.route?.fullSteps) ? detail.route.fullSteps : []
   if (!detail?.route || !Number.isInteger(stepIndex) || stepIndex < 0 || stepIndex >= steps.length) {
     activeRouteStepIndex.value = -1
-    if (detail) rebuildRouteOverlay(detail, { focusBounds: false })
+    if (detail) renderRouteOverlay(detail, { focusBounds: false })
     return
   }
 
   const { fly = true, rerender = true } = options
   activeRouteStepIndex.value = stepIndex
   if (rerender) {
-    rebuildRouteOverlay(detail, { focusBounds: false })
+    renderRouteOverlay(detail, { focusBounds: false })
   }
 
   const stepPoints = decodeStepPolyline(steps[stepIndex])
@@ -574,7 +705,7 @@ function getActiveRouteStepText() {
 function focusWholeRoute() {
   if (!currentRouteState.value) return
   activeRouteStepIndex.value = -1
-  rebuildRouteOverlay(currentRouteState.value)
+  renderRouteOverlay(currentRouteState.value)
   window.dispatchEvent(new CustomEvent('map-route-step-changed', {
     detail: { stepIndex: -1 },
   }))

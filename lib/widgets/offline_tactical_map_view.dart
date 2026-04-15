@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -15,13 +15,6 @@ import '../services/mbtiles_reader.dart';
 import '../theme/rescue_theme.dart';
 
 /// 离线战术地图视图组件
-///
-/// 特性：
-/// - 基于 MBTiles 的纯离线地图渲染
-/// - 在线瓦片自动降级（OpenStreetMap）
-/// - 实时同步 meshStateProvider 中的求救者位置
-/// - 动态红色闪烁标靶标记
-/// - 网络状态自动检测
 class OfflineTacticalMapView extends ConsumerStatefulWidget {
   const OfflineTacticalMapView({super.key});
 
@@ -32,6 +25,11 @@ class OfflineTacticalMapView extends ConsumerStatefulWidget {
 
 class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
     with TickerProviderStateMixin {
+  static const String _expectedOfflineMapName = 'Rescue Mesh Tactical Grid';
+  static const String _tiandituApiKey = 'd9f8596e7de371267b98dd849fa6321a';
+  static const String _tiandituSourceLabel = '地图来源：国家地理信息公共服务平台（天地图）';
+  static const String _tiandituApprovalLabel = '审图号：GS（2025）1508号';
+
   late final AnimationController _markerPulseController;
   bool _useOnlineFallback = false;
   bool _isLoading = true;
@@ -76,10 +74,8 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
       final hasNetwork = connectivityResult.any(
         (result) => result != ConnectivityResult.none,
       );
-      // 网络状态用于日志记录和调试
-      debugPrint(
-        '网络状态: ${hasNetwork ? "已连接" : "无连接"}',
-      );
+      // 网络状态仅用于日志记录和调试
+      debugPrint('网络状态: ${hasNetwork ? "已连接" : "无连接"}');
     } catch (e) {
       debugPrint('网络状态检查失败: $e');
     }
@@ -186,9 +182,14 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
         );
   }
 
-  /// 初始化地图文件路径并验证存在性
+  /// 初始化地图文件路径并验证可用性
   Future<void> _initMapFile() async {
     try {
+      final connectivityResult = await Connectivity().checkConnectivity();
+      final hasNetwork = connectivityResult.any(
+        (result) => result != ConnectivityResult.none,
+      );
+
       // 优先从本地存储加载 MBTiles 文件
       final appDir = await getApplicationDocumentsDirectory();
       final mapsDir = Directory('${appDir.path}/maps');
@@ -205,10 +206,15 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
         try {
           final reader = MbtilesReader(filePath: localMapFile.path);
           await reader.open();
+          if (!_isExpectedOfflineMap(reader)) {
+            reader.close();
+            await _copyMbtilesFromAssets(localMapFile);
+            return;
+          }
           final center = reader.center;
           final minZoom = reader.minZoom;
           final maxZoom = reader.maxZoom;
-          final attribution = _buildOfflineAttribution(reader);
+          final attribution = _offlineAttributionForReader(reader);
           reader.close();
 
           setState(() {
@@ -220,13 +226,13 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
             _offlineMaxZoom = (maxZoom + 2).toDouble();
             _offlineInitialZoom = maxZoom >= 15 ? 15.0 : maxZoom.toDouble();
             _mapAttributionLabel = attribution;
-            _useOnlineFallback = false;
+            _useOnlineFallback = hasNetwork && _hasTiandituApiKey;
             _isLoading = false;
           });
           _moveToOfflineCenterIfNeeded();
           return;
         } catch (e) {
-          debugPrint('MBTiles 文件损坏，将在在线模式下运行: $e');
+          debugPrint('MBTiles 文件损坏，将切换到在线模式: $e');
         }
       }
 
@@ -246,9 +252,17 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
   /// 从 assets/maps/ 复制 MBTiles 文件到本地存储
   Future<void> _copyMbtilesFromAssets(File targetFile) async {
     try {
+      final connectivityResult = await Connectivity().checkConnectivity();
+      final hasNetwork = connectivityResult.any(
+        (result) => result != ConnectivityResult.none,
+      );
+
       // 从 assets/maps/tactical.mbtiles 读取并写入本地存储
       final byteData = await rootBundle.load('assets/maps/tactical.mbtiles');
       final buffer = byteData.buffer.asUint8List();
+      if (await targetFile.exists()) {
+        await targetFile.delete();
+      }
       await targetFile.writeAsBytes(buffer);
 
       // 验证复制后的文件
@@ -257,7 +271,7 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
       final center = reader.center;
       final minZoom = reader.minZoom;
       final maxZoom = reader.maxZoom;
-      final attribution = _buildOfflineAttribution(reader);
+      final attribution = _offlineAttributionForReader(reader);
       reader.close();
 
       setState(() {
@@ -269,43 +283,60 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
         _offlineMaxZoom = (maxZoom + 2).toDouble();
         _offlineInitialZoom = maxZoom >= 15 ? 15.0 : maxZoom.toDouble();
         _mapAttributionLabel = attribution;
-        _useOnlineFallback = false;
+        _useOnlineFallback = hasNetwork && _hasTiandituApiKey;
         _isLoading = false;
       });
       _moveToOfflineCenterIfNeeded();
     } catch (e) {
       debugPrint('从 assets 复制 MBTiles 失败: $e');
-      // 复制失败，检查网络状态决定是否使用在线瓦片
+      // 复制失败后，检查网络状态决定是否使用在线瓦片
       final connectivityResult = await Connectivity().checkConnectivity();
       final hasNetwork = connectivityResult.any(
         (result) => result != ConnectivityResult.none,
       );
 
       setState(() {
-        _useOnlineFallback = hasNetwork;
-        _mapAttributionLabel = _buildOnlineAttribution();
+        _useOnlineFallback = hasNetwork && _hasTiandituApiKey;
+        _mapAttributionLabel = _onlineAttributionLabel();
         _isLoading = false;
       });
     }
   }
 
-  String _buildOfflineAttribution(MbtilesReader reader) {
+  String _offlineAttributionForReader(MbtilesReader reader) {
     final rawAttribution = reader.attribution?.trim();
     if (rawAttribution != null && rawAttribution.isNotEmpty) {
+      if (rawAttribution.contains('Tianditu') ||
+          rawAttribution.contains('Map source: Tianditu')) {
+        return '$_tiandituSourceLabel\n$_tiandituApprovalLabel';
+      }
       return rawAttribution;
     }
 
     final mapName = reader.name?.trim();
     if (mapName != null && mapName.isNotEmpty) {
-      return '离线地图数据：$mapName';
+      return '$mapName\n$_tiandituSourceLabel\n$_tiandituApprovalLabel';
     }
 
-    return '离线地图数据：OpenStreetMap（OpenStreetMap contributors，ODbL）';
+    return '$_tiandituSourceLabel\n$_tiandituApprovalLabel';
   }
 
-  String _buildOnlineAttribution() {
-    return '在线底图：高德地图 | 数据参考：OpenStreetMap（OpenStreetMap contributors）';
+  String _onlineAttributionLabel() {
+    return '$_tiandituSourceLabel\n$_tiandituApprovalLabel';
   }
+
+  bool _isExpectedOfflineMap(MbtilesReader reader) {
+    final mapName = reader.name?.trim();
+    if (mapName == _expectedOfflineMapName) {
+      return true;
+    }
+
+    final attribution = reader.attribution ?? '';
+    return attribution.contains('Tianditu') ||
+        attribution.contains('国家地理信息公共服务平台');
+  }
+
+  bool get _hasTiandituApiKey => _tiandituApiKey.trim().isNotEmpty;
 
   void _moveToOfflineCenterIfNeeded() {
     if (_currentPosition != null || _offlineMapCenter == null) {
@@ -327,11 +358,9 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
 
   @override
   Widget build(BuildContext context) {
-    // 监听 mesh 状态
     final meshState = ref.watch(meshStateProvider);
     final discoveredDevices = meshState.discoveredDevices.values;
 
-    // 加载中状态
     if (_isLoading) {
       return const Center(
         child: CircularProgressIndicator(
@@ -340,7 +369,6 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
       );
     }
 
-    // 完全降级：无网络且无离线瓦片
     if (!_useOnlineFallback && _mapFilePath == null) {
       return _buildFallbackWidget();
     }
@@ -349,7 +377,6 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
       borderRadius: BorderRadius.circular(16),
       child: Stack(
         children: [
-          // 地图主体
           FlutterMap(
             mapController: _mapController,
             options: MapOptions(
@@ -357,7 +384,9 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
                   _currentPosition ??
                   _offlineMapCenter ??
                   const LatLng(20.02, 110.35),
-              initialZoom: _currentPosition != null ? 15.0 : _offlineInitialZoom,
+              initialZoom: _currentPosition != null
+                  ? 15.0
+                  : _offlineInitialZoom,
               minZoom: _useOnlineFallback ? 3.0 : _offlineMinZoom,
               maxZoom: _useOnlineFallback ? 19.0 : _offlineMaxZoom,
               interactionOptions: const InteractionOptions(
@@ -365,9 +394,8 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
               ),
             ),
             children: [
-              // 瓦片图层：离线 MBTiles 或在线 OSM
               if (_useOnlineFallback)
-                _buildOnlineTileLayer()
+                ..._buildOnlineTileLayers()
               else
                 TileLayer(
                   tileProvider: MbTilesTileProvider(filePath: _mapFilePath!),
@@ -379,7 +407,6 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
                   maxNativeZoom: _offlineMaxNativeZoom.toInt(),
                 ),
 
-              // 当前位置标记
               if (_currentPosition != null)
                 MarkerLayer(
                   markers: [
@@ -412,12 +439,10 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
                   ],
                 ),
 
-              // 动态求救者标记层
               MarkerLayer(markers: _buildRescueMarkers(discoveredDevices)),
             ],
           ),
 
-          // 地图信息覆盖层
           Positioned(
             top: 12,
             right: 12,
@@ -444,8 +469,8 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
                       ),
                       const SizedBox(width: 4),
                       Text(
-                        _useOnlineFallback ? '在线地图' : '离线战术地图',
-                        style: TextStyle(
+                        _useOnlineFallback ? '在线地图' : '离线地图',
+                        style: const TextStyle(
                           color: Colors.white,
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
@@ -509,7 +534,7 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
                   ),
                   child: Text(
                     _useOnlineFallback
-                        ? _buildOnlineAttribution()
+                        ? _onlineAttributionLabel()
                         : _mapAttributionLabel,
                     style: const TextStyle(
                       color: Colors.white,
@@ -527,18 +552,33 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
     );
   }
 
-  /// 构建在线瓦片图层（降级方案）
-  /// 使用高德地图作为国内瓦片源，解决 OpenStreetMap 在国内访问受限导致灰屏的问题
-  Widget _buildOnlineTileLayer() {
+  List<Widget> _buildOnlineTileLayers() {
+    if (!_hasTiandituApiKey) {
+      return const <Widget>[];
+    }
+
+    return <Widget>[
+      _buildTiandituLayer(layerId: 'vec', layerGroup: 'vec_w', zIndex: 1),
+      _buildTiandituLayer(layerId: 'cva', layerGroup: 'cva_w', zIndex: 2),
+    ];
+  }
+
+  Widget _buildTiandituLayer({
+    required String layerId,
+    required String layerGroup,
+    required int zIndex,
+  }) {
     return TileLayer(
-      // 高德地图瓦片源（支持中文标注，国内访问稳定）
-      // s 参数为子域名 {1,2,3,4}，用于负载均衡
       urlTemplate:
-          'https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}',
-      subdomains: const ['1', '2', '3', '4'],
+          'https://t{s}.tianditu.gov.cn/$layerGroup/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0'
+          '&LAYER=$layerId&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles'
+          '&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=$_tiandituApiKey',
+      subdomains: const ['0', '1', '2', '3', '4', '5', '6', '7'],
       userAgentPackageName: 'com.rescuemesh.app',
       maxZoom: 18,
       tileProvider: NetworkTileProvider(),
+      panBuffer: 0,
+      additionalOptions: <String, String>{'zIndex': '$zIndex'},
     );
   }
 
@@ -571,19 +611,36 @@ class _OfflineTacticalMapViewState extends ConsumerState<OfflineTacticalMapView>
       decoration: BoxDecoration(
         color: RescuePalette.panel,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: RescuePalette.border),
+        border: const Border.fromBorderSide(
+          BorderSide(color: RescuePalette.border),
+        ),
       ),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.map_outlined, size: 64, color: RescuePalette.warning),
+            const Icon(
+              Icons.map_outlined,
+              size: 64,
+              color: RescuePalette.warning,
+            ),
             const SizedBox(height: 16),
             Text(
-              '离线瓦片未就绪',
+              _hasTiandituApiKey ? '离线瓦片未就绪' : '未配置天地图 Key',
               style: Theme.of(context).textTheme.titleMedium?.copyWith(
                 fontWeight: FontWeight.w700,
                 color: RescuePalette.textPrimary,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              _hasTiandituApiKey
+                  ? '请先准备离线地图包，或在联网状态下使用天地图在线底图。'
+                  : '启动时请通过 --dart-define=TIANDITU_API_KEY=你的天地图Key 配置在线底图。',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: RescuePalette.textMuted,
+                height: 1.5,
               ),
             ),
           ],
@@ -605,7 +662,7 @@ class _PulsingBeaconPainter extends CustomPainter {
     final center = Offset(size.width / 2, size.height / 2);
     final baseRadius = size.width * 0.18;
 
-    // 根据 RSSI 计算颜色（信号越强越绿，越弱越红）
+    // 根据 RSSI 计算颜色，信号越强越偏绿，越弱越偏红。
     final signalQuality = ((rssi + 100) / 80).clamp(0.0, 1.0);
     final paintColor = Color.lerp(
       RescuePalette.critical,

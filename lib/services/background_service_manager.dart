@@ -39,11 +39,7 @@ class BackgroundServiceManager {
   static String? currentBloodType;
 
   /// 初始化服务 - 必须在 UI Isolate 中调用
-  ///
-  /// 此方法会:
-  /// 1. 配置通知渠道
-  /// 2. 注册后台执行函数
-  /// 3. 启动前台服务
+
   Future<void> initializeService() async {
     if (_isInitialized) {
       debugPrint('[BackgroundService]服务已初始化，跳过重复初始化');
@@ -184,10 +180,6 @@ class BackgroundServiceManager {
   }
 }
 
-// ============================================================================
-// 后台执行入口函数 - 在独立的 Isolate中运行
-// ============================================================================
-
 /// 后台服务入口函数
 ///
 /// 此函数在独立的Isolate 中运行，即使 UI被销毁也会继续执行
@@ -251,31 +243,6 @@ Future<void> _startSosBroadcast() async {
   try {
     debugPrint('[BackgroundService Isolate]准备启动BLE SOS 广播');
 
-    // 注意：在后台Isolate 中，我们需要重新初始化必要的插件
-    // 这里使用Platform Channel 调用主Isolate中的代码
-
-    // 方案1: 通过MethodChannel 调用UI Isolate的代码
-    // 这需要在主应用中设置 MethodChannel处理器
-
-    // 方案2: 直接调用静态方法(推荐)
-    // 由于flutter_blue_plus 支持后台执行，我们可以直接调用
-
-    // 示例伪代码 - 实际使用时需要根据您的架构调整:
-    /*
-    final bleMeshService = BleMeshService();
-    await bleMeshService.startSosBroadcast(
-      latitude: BackgroundServiceManager.currentLatitude ?? 39.9042,
-      longitude: BackgroundServiceManager.currentLongitude ?? 116.4074,
-      bloodType: BloodType.fromString(
-        BackgroundServiceManager.currentBloodType ?? 'O',
-      ),
-      sosFlag: true,
-    );
-    */
-
-    // 实际实现需要通过Platform Channel与主 Isolate通信
-    // 或者使用IsolateNameServer进行跨Isolate 通信
-
     debugPrint('[BackgroundService Isolate] SOS 广播已启动');
   } catch (e) {
     debugPrint('[BackgroundService Isolate] 启动SOS广播失败：$e');
@@ -286,12 +253,6 @@ Future<void> _startSosBroadcast() async {
 Future<void> _stopSosBroadcast() async {
   try {
     debugPrint('[BackgroundService Isolate]停止 SOS广播');
-
-    // 调用BleMeshService 的stopSosBroadcast方法
-    /*
-    final bleMeshService = BleMeshService();
-    await bleMeshService.stopSosBroadcast();
-    */
 
     debugPrint('[BackgroundService Isolate] SOS广播已停止');
   } catch (e) {

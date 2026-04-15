@@ -5,7 +5,7 @@ import 'database.dart';
 import 'models/emergency_profile.dart';
 import 'theme/rescue_theme.dart';
 
-// ── Database-backed storage ───────────────────────────────────
+// Database-backed storage
 // Using Drift database instead of SharedPreferences
 
 class MedicalProfilePage extends StatefulWidget {
@@ -61,7 +61,6 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
       debugPrint('Error loading medical profile: $e');
       if (!mounted) return;
       setState(() {
-        // Use default empty values
         _nameCtrl.text = '';
         _ageCtrl.text = '';
         _historyCtrl.text = '';
@@ -75,7 +74,6 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
   Future<void> _save() async {
     setState(() => _saving = true);
     try {
-      // Save to database
       await appDb.saveMedicalProfile(
         name: _nameCtrl.text.trim(),
         age: _ageCtrl.text.trim(),
@@ -85,13 +83,13 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
         emergencyContact: _contactCtrl.text.trim(),
       );
 
-      // Sync to EmergencyProfile
       EmergencyProfile.updateProfile(
-        callsign: _nameCtrl.text.trim().isEmpty ? _nameCtrl.text.trim() : null,
+        callsign: _nameCtrl.text.trim().isNotEmpty ? _nameCtrl.text.trim() : null,
         bloodType: _blood,
         allergies: _allergyCtrl.text.trim(),
         emergencyContact: _contactCtrl.text.trim(),
       );
+      await EmergencyProfile.saveToPrefs();
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -101,7 +99,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
               Icon(Icons.check_circle, color: RescuePalette.success, size: 20),
               SizedBox(width: 10),
               Text(
-                '✅ 档案已安全保存到数据库',
+                '档案已安全保存到数据库',
                 style: TextStyle(
                   color: RescuePalette.success,
                   fontWeight: FontWeight.w700,
@@ -129,7 +127,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
               Icon(Icons.error, color: RescuePalette.critical, size: 20),
               SizedBox(width: 10),
               Text(
-                '❌ 保存失败，请重试',
+                '保存失败，请重试',
                 style: TextStyle(
                   color: RescuePalette.critical,
                   fontWeight: FontWeight.w700,
@@ -234,25 +232,6 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
                     kb: TextInputType.phone,
                   ),
                 ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    const SizedBox(width: 4),
-                    const Icon(
-                      Icons.lock_outline,
-                      size: 13,
-                      color: RescuePalette.textMuted,
-                    ),
-                    const SizedBox(width: 5),
-                    Text(
-                      '资料会保存在当前设备；发起 SOS 并联网同步时，基础医疗信息可能随求救记录一并上传。',
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        color: RescuePalette.textMuted.withValues(alpha: 0.8),
-                      ),
-                    ),
-                  ],
-                ),
               ],
             ),
           ),
@@ -262,7 +241,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
     );
   }
 
-  // ── Header gradient banner ──────────────────────────────────
+  // Header gradient banner
   Widget _buildHeader() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
@@ -322,7 +301,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
     );
   }
 
-  // ── Generic text field ──────────────────────────────────────
+  // Generic text field
   Widget _field(
     TextEditingController ctrl,
     String label,
@@ -358,7 +337,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
     );
   }
 
-  // ── Blood type ChoiceChips ──────────────────────────────────
+  // Blood type ChoiceChips
   Widget _buildBloodChips() {
     return Wrap(
       spacing: 10,
@@ -392,7 +371,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
     );
   }
 
-  // ── Gradient save button ────────────────────────────────────
+  // Gradient save button
   Widget _buildSaveBtn() {
     return SafeArea(
       child: Padding(
@@ -456,7 +435,7 @@ class _MedicalProfilePageState extends State<MedicalProfilePage> {
   }
 }
 
-// ── Reusable card shell ──────────────────────────────────────
+// Reusable card shell
 class _MedCard extends StatelessWidget {
   const _MedCard({
     required this.icon,

@@ -4,8 +4,14 @@ const SosRecord = require('../models/SosRecord');
 const socketService = require('../socket');
 const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
 const { generateSituationReport, answerQuestion } = require('../services/llmService');
-const { generateSingleRescuePlan, optimizeBatchRescue } = require('../services/rescuePlannerService');
-const { reverseGeocode, searchNearbyHospitalsWithAMap, searchHospitalsByKeywordWithAMap } = require('../services/geocodingService');
+const { generateSingleRescuePlan, generateNearestRescueTeamPlan, optimizeBatchRescue } = require('../services/rescuePlannerService');
+const {
+  reverseGeocode,
+  searchNearbyHospitalsWithAMap,
+  searchHospitalsByKeywordWithAMap,
+  searchNearbyRescueTeamsWithAMap,
+  searchRescueTeamsByKeywordWithAMap,
+} = require('../services/geocodingService');
 const { wgs84ToGcj02 } = require('../utils/coordTransform');
 
 // 去重时间容差：10 分钟（毫秒）
@@ -113,29 +119,6 @@ router.get('/active', async (req, res) => {
   } catch (err) {
     console.error('[GET /active]', err);
     return res.status(500).json({ error: '服务器内部错误' });
-  }
-});
-
-router.delete('/:id', async (req, res) => {
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ error: 'Invalid SOS record id.' });
-    }
-
-    const deletedRecord = await SosRecord.findByIdAndDelete(req.params.id);
-    if (!deletedRecord) {
-      return res.status(404).json({ error: 'SOS record not found.' });
-    }
-
-    socketService.broadcastDeletedSos(deletedRecord);
-
-    return res.status(200).json({
-      success: true,
-      id: req.params.id,
-    });
-  } catch (err) {
-    console.error('[DELETE /:id]', err);
-    return res.status(500).json({ error: 'Failed to delete SOS record.' });
   }
 });
 
@@ -511,6 +494,153 @@ router.get('/ai/debug-hospitals/:mac', async (req, res) => {
   }
 });
 
+router.get('/ai/debug-rescue-teams/:mac', async (req, res) => {
+  try {
+    const { mac } = req.params;
+    const sosRecord = await SosRecord.findOne({
+      senderMac: mac.toUpperCase(),
+      status: 'active',
+    }).lean({ virtuals: true });
+
+    if (!sosRecord) {
+      return res.status(404).json({ error: 'active sos record not found' });
+    }
+
+    const [lng, lat] = sosRecord.location?.coordinates || [];
+    if (!Number.isFinite(lng) || !Number.isFinite(lat)) {
+      return res.status(400).json({ error: 'invalid sos coordinates' });
+    }
+
+    const address = await reverseGeocode(lng, lat);
+    const searchPlans = [
+      {
+        label: 'primary_rescue',
+        keywords: [
+          '\u0031\u0032\u0030\u6025\u6551\u4e2d\u5fc3',
+          '\u6025\u6551\u4e2d\u5fc3',
+          '\u6025\u6551\u7ad9',
+          '\u6d88\u9632\u6551\u63f4\u7ad9',
+          '\u6d88\u9632\u7ad9',
+          '\u6d3e\u51fa\u6240',
+          '\u516c\u5b89\u5c40',
+        ],
+        radii: [10000, 30000, 50000],
+      },
+      {
+        label: 'fallback_rescue',
+        keywords: [
+          '\u5e94\u6025\u6551\u63f4',
+          '\u533b\u9662\u6025\u8bca',
+          '\u6025\u8bca\u79d1',
+        ],
+        radii: [10000, 30000, 50000],
+      },
+    ];
+
+    const probes = [];
+    for (const plan of searchPlans) {
+      for (const radius of plan.radii) {
+        for (const keyword of plan.keywords) {
+          try {
+            const pois = await searchNearbyRescueTeamsWithAMap(lng, lat, {
+              radius,
+              pageSize: 10,
+              keywords: [keyword],
+            });
+
+            probes.push({
+              group: plan.label,
+              keyword,
+              radius,
+              count: pois.length,
+              rescueTeams: pois.slice(0, 5).map((poi) => ({
+                name: poi.name,
+                distance: poi.distance,
+                type: poi.type,
+                address: poi.address,
+                location: poi.location,
+              })),
+            });
+          } catch (error) {
+            probes.push({
+              group: plan.label,
+              keyword,
+              radius,
+              error: error.message,
+            });
+          }
+        }
+      }
+    }
+
+    const keywordProbes = [];
+    const keywordSearchTerms = [
+      '\u0031\u0032\u0030\u6025\u6551\u4e2d\u5fc3',
+      '\u6025\u6551\u4e2d\u5fc3',
+      '\u6025\u6551\u7ad9',
+      '\u6d88\u9632\u6551\u63f4\u7ad9',
+      '\u6d88\u9632\u7ad9',
+      '\u6d3e\u51fa\u6240',
+      '\u516c\u5b89\u5c40',
+      '\u5e94\u6025\u6551\u63f4',
+      '\u533b\u9662\u6025\u8bca',
+      '\u6025\u8bca\u79d1',
+    ];
+    try {
+      const pois = await searchRescueTeamsByKeywordWithAMap(lng, lat, {
+        district: address?.addressComponent?.district || '',
+        city: address?.addressComponent?.city || address?.addressComponent?.province || '',
+        pageSize: 10,
+        maxPages: 2,
+        maxDistanceMeters: 50000,
+        keywords: keywordSearchTerms,
+      });
+
+      keywordProbes.push({
+        count: pois.length,
+        rescueTeams: pois.slice(0, 10).map((poi) => ({
+          name: poi.name,
+          approxDistance: poi.approxDistance,
+          type: poi.type,
+          address: poi.address,
+          location: poi.location,
+        })),
+      });
+    } catch (error) {
+      keywordProbes.push({
+        error: error.message,
+      });
+    }
+
+    const ranked = rankSosList([sosRecord]);
+    sosRecord.priority = ranked[0]?.priority || null;
+    const plan = await generateNearestRescueTeamPlan(sosRecord);
+    const routeAnchorDebug = buildRescueRouteAnchorDebug(plan);
+
+    return res.status(200).json({
+      data: {
+        mac: sosRecord.senderMac,
+        coordinates: [lng, lat],
+        address: {
+          formattedAddress: address?.formattedAddress || '',
+          addressComponent: address?.addressComponent || {},
+          pois: (address?.pois || []).slice(0, 5),
+        },
+        probes,
+        keywordProbes,
+        routeAnchorDebug,
+        finalPlan: {
+          route: plan.route,
+          recommendedRescueTeams: plan.recommendedRescueTeams,
+        },
+      },
+    });
+  } catch (err) {
+    console.error('[GET /ai/debug-rescue-teams]', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 /**
  * GET /api/sos/ai/rescue-plan/:mac
  *
@@ -792,17 +922,20 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
   delete summaryOverrides.intentHint;
   delete summaryOverrides.targetMac;
   const hintedIntent = normalizeIntentHint(clientContext.intentHint);
-  const intent = hintedIntent || classifyQuestionIntent(question);
+  const classifiedIntent = classifyQuestionIntent(question);
+  const intent = classifiedIntent === 'rescue_dispatch' ? 'rescue_dispatch' : (hintedIntent || classifiedIntent);
   const includeAllLocationCases = shouldIncludeAllLocationCases(question, intent);
   const topRecords = rankedRecords.slice(0, 8);
   const matchedRecords = findRelevantRecords(question, rankedRecords, intent, chatHistory, clientContext.targetMac);
   const focusRecords = matchedRecords.length > 0
-    ? matchedRecords.slice(0, intent === 'route_plan' ? 3 : 5)
+    ? matchedRecords.slice(0, ['route_plan', 'rescue_dispatch'].includes(intent) ? 3 : 5)
     : topRecords.slice(0, intent === 'priority' ? 3 : 5);
-  const planTargets = intent === 'route_plan' ? focusRecords.slice(0, 3) : [];
+  const planTargets = ['route_plan', 'rescue_dispatch'].includes(intent) ? focusRecords.slice(0, 3) : [];
   const locationDetailsByMac = new Map();
 
   const generatedPlans = [];
+  const generatedRescuePlans = [];
+  if (intent === 'route_plan') {
   for (const record of planTargets) {
     try {
       const plan = await generateSingleRescuePlan(record);
@@ -829,6 +962,38 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
         dispatchHint: '自动规划失败，当前无法给出可靠路线，建议人工调度复核。',
         aiRecommendations: [`自动规划失败: ${error.message}`],
       });
+    }
+  }
+  }
+
+  if (intent === 'rescue_dispatch') {
+    for (const record of planTargets) {
+      try {
+        const plan = await generateNearestRescueTeamPlan(record);
+        generatedRescuePlans.push({
+          mac: record.senderMac,
+          name: record.medicalProfile?.name || '',
+          priorityScore: record.priority?.score ?? 0,
+          severityLevel: record.priority?.severityLevel || 'unknown',
+          address: plan.location?.address || '',
+          routeSummary: plan.route || null,
+          recommendedRescueTeams: plan.recommendedRescueTeams || [],
+          dispatchHint: buildRescueDispatchHint(plan.route, plan.dispatchRecommendations),
+          dispatchRecommendations: plan.dispatchRecommendations || [],
+        });
+      } catch (error) {
+        generatedRescuePlans.push({
+          mac: record.senderMac,
+          name: record.medicalProfile?.name || '',
+          priorityScore: record.priority?.score ?? 0,
+          severityLevel: record.priority?.severityLevel || 'unknown',
+          address: '',
+          routeSummary: null,
+          recommendedRescueTeams: [],
+          dispatchHint: `rescue team planning failed: ${error.message}`,
+          dispatchRecommendations: [`rescue team planning failed: ${error.message}`],
+        });
+      }
     }
   }
 
@@ -921,6 +1086,7 @@ async function buildChatContext(question, rankedRecords, clientContext = {}) {
       confidence: record.confidence ?? (record.reportedBy?.length || 0),
     }, intent)),
     generatedPlans: intent === 'route_plan' ? generatedPlans : [],
+    generatedRescuePlans: intent === 'rescue_dispatch' ? generatedRescuePlans : [],
   };
 }
 
@@ -1061,6 +1227,28 @@ function resolveRecordsFromHistory(chatHistory, rankedRecords) {
 function classifyQuestionIntent(question) {
   const text = String(question || '');
 
+  const rescueTerms = [
+    '\u6551\u63f4\u961f',
+    '\u6551\u63f4\u529b\u91cf',
+    '\u6d88\u9632',
+    '\u6d88\u9632\u961f',
+    '\u6d3e\u51fa\u6240',
+    '\u8b66\u5bdf',
+    '\u516c\u5b89',
+    '\u6025\u6551\u4e2d\u5fc3',
+    '\u0031\u0032\u0030',
+    '\u6551\u62a4\u8f66',
+    '\u6025\u6551\u8f66',
+    '\u8c01\u53bb\u6551',
+    '\u6d3e\u8c01',
+    '\u5c31\u8fd1\u6551\u63f4',
+    '\u8c01\u53bb\u73b0\u573a',
+    '\u8c01\u53bb\u5904\u7f6e',
+  ];
+  if (rescueTerms.some((term) => text.includes(term))) {
+    return 'rescue_dispatch';
+  }
+
   const routeTerms = ['\u8def\u7ebf', '\u89c4\u5212', '\u9001\u533b', '\u533b\u9662', '\u8c03\u5ea6', '\u65b9\u6848'];
   if (routeTerms.some((term) => text.includes(term))) {
     return 'route_plan';
@@ -1096,7 +1284,10 @@ function classifyQuestionIntent(question) {
 
 function normalizeIntentHint(intentHint) {
   const value = String(intentHint || '').trim().toLowerCase();
-  const allowed = new Set(['route_plan', 'priority', 'location', 'identity', 'medical', 'contact', 'general']);
+  const allowed = new Set(['route_plan', 'rescue_dispatch', 'priority', 'location', 'identity', 'medical', 'contact', 'general']);
+  if (value === 'general') {
+    return '';
+  }
   return allowed.has(value) ? value : '';
 }
 
@@ -1145,19 +1336,30 @@ function pruneCaseForIntent(data, intent) {
         name: data.name,
         emergencyContact: data.emergencyContact,
       };
-    case 'route_plan':
-      return {
-        mac: data.mac,
-        name: data.name,
-        priorityScore: data.priorityScore,
-        severityLevel: data.severityLevel,
-        elapsedMin: data.elapsedMin,
-        allergies: data.allergies,
-        medicalHistory: data.medicalHistory,
-        locationText: data.locationText,
-      };
-    default:
-      return {
+      case 'route_plan':
+        return {
+          mac: data.mac,
+          name: data.name,
+          priorityScore: data.priorityScore,
+          severityLevel: data.severityLevel,
+          elapsedMin: data.elapsedMin,
+          allergies: data.allergies,
+          medicalHistory: data.medicalHistory,
+          locationText: data.locationText,
+        };
+      case 'rescue_dispatch':
+        return {
+          mac: data.mac,
+          name: data.name,
+          priorityScore: data.priorityScore,
+          severityLevel: data.severityLevel,
+          elapsedMin: data.elapsedMin,
+          allergies: data.allergies,
+          medicalHistory: data.medicalHistory,
+          locationText: data.locationText,
+        };
+      default:
+        return {
         mac: data.mac,
         name: data.name,
         priorityScore: data.priorityScore,
@@ -1204,6 +1406,22 @@ function buildDispatchHint(route) {
   }
 
   return '路线处于常规应急转运范围，可按当前推荐方案执行。';
+}
+
+function buildRescueDispatchHint(route, recommendations = []) {
+  if (!route) {
+    return 'rescue team route unavailable';
+  }
+
+  if (Array.isArray(recommendations) && recommendations.length > 0) {
+    return recommendations[0];
+  }
+
+  if (route.distanceMeters >= 50000 || route.estimatedTimeMinutes >= 90) {
+    return 'nearest rescue team is still far away; consider parallel dispatch';
+  }
+
+  return 'nearest rescue team route is available';
 }
 
 function sanitizePlanRecommendations(recommendations) {
@@ -1273,19 +1491,25 @@ function buildNearbyLandmark(address) {
 }
 
 function buildRouteOverlay(chatContext = {}) {
-  const plans = Array.isArray(chatContext.generatedPlans) ? chatContext.generatedPlans : [];
-  const plan = plans[0];
+  const hospitalPlans = Array.isArray(chatContext.generatedPlans) ? chatContext.generatedPlans : [];
+  const rescuePlans = Array.isArray(chatContext.generatedRescuePlans) ? chatContext.generatedRescuePlans : [];
+  const isRescueDispatch = rescuePlans.length > 0;
+  const plan = isRescueDispatch ? rescuePlans[0] : hospitalPlans[0];
   if (!plan?.routeSummary?.fullSteps?.length) {
     return null;
   }
 
   return {
-    mac: plan.mac,
-    name: plan.name || '',
-    hospitalName: plan.routeSummary.toHospital,
-    address: plan.address || '',
-    route: plan.routeSummary,
-  };
+      mac: plan.mac,
+      name: isRescueDispatch ? (plan.routeSummary.fromTeam || '') : (plan.name || ''),
+      startName: isRescueDispatch ? (plan.routeSummary.fromTeam || '') : (plan.name || plan.mac),
+      endName: isRescueDispatch ? (plan.name || plan.mac) : plan.routeSummary.toHospital,
+      startType: isRescueDispatch ? 'rescue_team' : 'victim',
+      endType: isRescueDispatch ? 'victim' : 'hospital',
+      hospitalName: isRescueDispatch ? (plan.name || plan.mac) : plan.routeSummary.toHospital,
+      address: plan.address || '',
+      route: plan.routeSummary,
+    };
 }
 
 function buildRouteAnchorDebug(plan = {}) {
@@ -1311,6 +1535,50 @@ function buildRouteAnchorDebug(plan = {}) {
     },
     selectedHospital: {
       name: route.destinationMeta?.name || route.toHospital || '',
+      address: route.destinationMeta?.address || '',
+      type: route.destinationMeta?.type || '',
+      source: route.destinationMeta?.source || '',
+    },
+    rawSourceWgs,
+    rawSourceGcj,
+    navStartGcj,
+    sourceOffsetMeters: measureMeters(rawSourceGcj, navStartGcj),
+    rawDestinationWgs,
+    rawDestinationGcj,
+    navEndGcj,
+    destinationOffsetMeters: measureMeters(rawDestinationGcj, navEndGcj),
+  };
+}
+
+function buildRescueRouteAnchorDebug(plan = {}) {
+  const route = plan?.route;
+  if (!route) {
+    return null;
+  }
+
+  const routePoints = flattenRouteStepPolylines(route.fullSteps || []);
+  const navStartGcj = routePoints[0] || null;
+  const navEndGcj = routePoints[routePoints.length - 1] || null;
+  const rawSourceWgs = Array.isArray(route.sourceCoordinates) ? route.sourceCoordinates : null;
+  const rawDestinationWgs = Array.isArray(route.destinationCoordinates) ? route.destinationCoordinates : null;
+  const rawSourceGcj = convertWgsPairToGcj(rawSourceWgs);
+  const rawDestinationGcj = convertWgsPairToGcj(rawDestinationWgs);
+
+  return {
+    coordinateSystem: {
+      sourceInput: 'WGS84',
+      destinationInput: 'WGS84',
+      routePolyline: 'GCJ-02',
+      offsetsComparedIn: 'GCJ-02',
+    },
+    selectedRescueTeam: {
+      name: route.sourceMeta?.name || route.fromTeam || '',
+      address: route.sourceMeta?.address || '',
+      type: route.sourceMeta?.type || '',
+      source: route.sourceMeta?.source || '',
+    },
+    targetVictim: {
+      name: route.destinationMeta?.name || '',
       address: route.destinationMeta?.address || '',
       type: route.destinationMeta?.type || '',
       source: route.destinationMeta?.source || '',
