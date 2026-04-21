@@ -31,4 +31,15 @@ function broadcastNewSos(sosDoc) {
   console.log(`[Socket.io] 广播 new_sos_alert -> MAC: ${sosDoc.senderMac}`);
 }
 
-module.exports = { init, broadcastNewSos };
+function broadcastSosUpdate(sosDoc) {
+  if (!_io) {
+    console.warn('[Socket.io] 尚未初始化，无法广播更新');
+    return;
+  }
+
+  const payload = typeof sosDoc?.toJSON === 'function' ? sosDoc.toJSON() : sosDoc;
+  _io.emit('sos_updated', payload);
+  console.log(`[Socket.io] 广播 sos_updated -> MAC: ${payload.senderMac}`);
+}
+
+module.exports = { init, broadcastNewSos, broadcastSosUpdate };

@@ -6,6 +6,9 @@ import 'ble_mesh_exceptions.dart';
 import 'ble_mesh_service.dart';
 import 'network_sync_service.dart';
 import 'power_saving_manager.dart';
+import 'satellite_relay_service.dart';
+
+typedef LocationFactory = Location Function();
 
 class SosTriggerResult {
   const SosTriggerResult({
@@ -13,6 +16,7 @@ class SosTriggerResult {
     required this.latitude,
     required this.longitude,
     required this.uploadedCount,
+    required this.satelliteRelayResult,
     this.bleError,
     this.syncError,
   });
@@ -21,6 +25,7 @@ class SosTriggerResult {
   final double latitude;
   final double longitude;
   final int uploadedCount;
+  final SatelliteRelayResult satelliteRelayResult;
   final String? bleError;
   final String? syncError;
 
@@ -33,22 +38,30 @@ class SosTriggerService {
     AppDatabase? database,
     NetworkSyncService? networkSyncServiceOverride,
     PowerSavingManager? powerSavingManagerOverride,
+    SatelliteRelayService? satelliteRelayServiceOverride,
+    LocationFactory? locationFactory,
   }) : _database = database ?? appDb,
-       _networkSyncService =
-           networkSyncServiceOverride ?? networkSyncService,
-       _powerSavingManager =
-           powerSavingManagerOverride ?? powerSavingManager;
+        _networkSyncService =
+            networkSyncServiceOverride ?? networkSyncService,
+        _powerSavingManager =
+            powerSavingManagerOverride ?? powerSavingManager,
+        _satelliteRelayService =
+            satelliteRelayServiceOverride ?? satelliteRelayService,
+        _locationFactory = locationFactory ?? Location.new;
 
   final AppDatabase _database;
   final NetworkSyncService _networkSyncService;
   final PowerSavingManager _powerSavingManager;
+  final SatelliteRelayService _satelliteRelayService;
+  final LocationFactory _locationFactory;
 
   Future<SosTriggerResult> triggerSos({
     required BleMeshService bleService,
     required BloodType bloodType,
     String senderMac = 'SELF',
   }) async {
-    final location = Location();
+    final location = _locationFactory();
+    final triggeredAt = DateTime.now();
 
     var serviceEnabled = await location.serviceEnabled();
     if (!serviceEnabled) {
@@ -104,6 +117,22 @@ class SosTriggerService {
       bleError = error.toString();
     }
 
+    SatelliteRelayResult satelliteRelayResult;
+    try {
+      satelliteRelayResult = await _satelliteRelayService.relaySos(
+        SatelliteRelayRequest(
+          messageId: messageId,
+          latitude: latitude,
+          longitude: longitude,
+          bloodType: bloodType,
+          senderMac: senderMac,
+          timestamp: triggeredAt,
+        ),
+      );
+    } catch (error) {
+      satelliteRelayResult = SatelliteRelayResult.failed('$error');
+    }
+
     String? syncError;
     var uploadedCount = 0;
     try {
@@ -120,6 +149,7 @@ class SosTriggerService {
       latitude: latitude,
       longitude: longitude,
       uploadedCount: uploadedCount,
+      satelliteRelayResult: satelliteRelayResult,
       bleError: bleError,
       syncError: syncError,
     );

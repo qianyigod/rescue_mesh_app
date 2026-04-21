@@ -59,9 +59,42 @@ const sosRecordSchema = new mongoose.Schema(
       default: 'active',
       index: true,
     },
+    workflowStatus: {
+      type: String,
+      enum: ['reported', 'acknowledged', 'dispatching', 'on_scene', 'transferred', 'closed'],
+      default: 'reported',
+      index: true,
+    },
     reportedBy: {
       type: [String],
       default: [],
+    },
+    acknowledgedAt: {
+      type: Date,
+      default: null,
+    },
+    acknowledgedBy: {
+      type: String,
+      default: '',
+      trim: true,
+    },
+    dispatchInfo: {
+      teamName: { type: String, default: '', trim: true },
+      hospitalName: { type: String, default: '', trim: true },
+      etaMinutes: { type: Number, default: null, min: 0 },
+      note: { type: String, default: '', trim: true },
+      dispatchedAt: { type: Date, default: null },
+      dispatchedBy: { type: String, default: '', trim: true },
+    },
+    closureInfo: {
+      closedAt: { type: Date, default: null },
+      closedBy: { type: String, default: '', trim: true },
+      note: { type: String, default: '', trim: true },
+      resultStatus: {
+        type: String,
+        enum: ['', 'rescued', 'false_alarm'],
+        default: '',
+      },
     },
     // 个人医疗档案信息
     medicalProfile: {

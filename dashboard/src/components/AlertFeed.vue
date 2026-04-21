@@ -10,8 +10,12 @@
       <TransitionGroup name="slide" tag="div" class="feed-list">
         <div
           v-for="a in alerts.slice(0, 80)"
-          :key="`${a.senderMac}|${a.timestamp}`"
-          class="feed-item"
+          :key="getAlertKey(a)"
+          :class="['feed-item', { active: selectedAlertKey === getAlertKey(a) }]"
+          role="button"
+          tabindex="0"
+          @click="focusAlert(a)"
+          @keyup.enter="focusAlert(a)"
         >
           <div class="f-time">{{ fmtTime(a.timestamp) }}</div>
           <div class="f-body">
@@ -19,6 +23,7 @@
             <span v-if="a.medicalProfile?.name" class="name-tag">
               【{{ a.medicalProfile.name }}】
             </span>
+            <span class="workflow-tag">{{ workflowLabel(a) }}</span>
             收到 <span class="cyan">{{ fmtCoord(a.location.coordinates) }}</span> 求救<br>
             <span v-if="a.medicalProfile?.age">年龄：{{ a.medicalProfile.age }} | </span>
             血型 <span class="red">{{ getBloodTypeLabel(a) }}</span><br>
@@ -33,6 +38,9 @@
             <span v-if="a.medicalProfile?.emergencyContact" class="contact-text">
               | 联系：{{ a.medicalProfile.emergencyContact }}
             </span>
+            <span v-if="a.dispatchInfo?.teamName" class="dispatch-text">
+              | 救援队：{{ a.dispatchInfo.teamName }}
+            </span>
           </div>
         </div>
       </TransitionGroup>
@@ -41,9 +49,9 @@
 </template>
 
 <script setup>
-import { useSocket, BLOOD_LABELS } from '../composables/useSocket'
+import { useSocket, BLOOD_LABELS, WORKFLOW_LABELS, getAlertKey, getEffectiveBloodType } from '../composables/useSocket'
 
-const { alerts } = useSocket()
+const { alerts, selectedAlertKey, selectAlert } = useSocket()
 
 function fmtTime(ts) {
   return new Date(ts).toLocaleTimeString('zh-CN', {
@@ -56,11 +64,16 @@ function fmtCoord([lng, lat]) {
 }
 
 function getBloodTypeLabel(alert) {
-  // 优先使用 medicalProfile 中的详细血型
-  if (alert.medicalProfile?.bloodTypeDetail !== undefined) {
-    return BLOOD_LABELS[alert.medicalProfile.bloodTypeDetail] ?? '未知'
-  }
-  return BLOOD_LABELS[alert.bloodType] ?? '未知'
+  return BLOOD_LABELS[String(getEffectiveBloodType(alert))] ?? '未知'
+}
+
+function workflowLabel(alert) {
+  return WORKFLOW_LABELS[alert.workflowStatus] || '待处理'
+}
+
+function focusAlert(alert) {
+  selectAlert(alert)
+  window.dispatchEvent(new CustomEvent('map-flyto', { detail: alert }))
 }
 </script>
 
@@ -108,6 +121,31 @@ function getBloodTypeLabel(alert) {
   padding: 7px 10px;
   font-size: 0.73rem;
   line-height: 1.65;
+  cursor: pointer;
+  transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.feed-item:hover,
+.feed-item.active {
+  background: rgba(0, 80, 120, 0.16);
+  border-color: rgba(0, 229, 255, 0.32);
+  transform: translateX(2px);
+}
+
+.feed-item:focus-visible {
+  outline: 1px solid rgba(0, 229, 255, 0.6);
+}
+
+.workflow-tag {
+  display: inline-flex;
+  align-items: center;
+  margin-right: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(0, 229, 255, 0.28);
+  color: #8cefff;
+  font-size: 0.62rem;
+  letter-spacing: 1px;
 }
 
 .f-time {
@@ -124,6 +162,7 @@ function getBloodTypeLabel(alert) {
 .warning-text { color: #ffa500; font-weight: bold; }
 .history-text { color: #87ceeb; }
 .contact-text { color: #dda0dd; }
+.dispatch-text { color: #7fffd4; }
 
 /* TransitionGroup slide-in */
 .slide-enter-active { transition: all 0.28s ease; }

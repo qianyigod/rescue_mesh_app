@@ -50,16 +50,18 @@
       </div>
       <div v-if="!isRouteHudCompact" class="route-hud-note">虚线表示求救点或医院与实际可通行道路起终点之间的偏移。</div>
     </div>
+    <div class="map-approval">{{ MAP_APPROVAL_TEXT }}</div>
     <div class="scan-line"></div>
   </div>
 </template>
 
 <script setup>
 import { ref, watchEffect, watch, onMounted, onUnmounted } from 'vue'
-import { useSocket, BLOOD_LABELS } from '../composables/useSocket'
+import { useSocket, BLOOD_LABELS, WORKFLOW_LABELS, getAlertKey, getEffectiveBloodType } from '../composables/useSocket'
 import { wgs84ToGcj02 } from '../utils/coordTransform'
 
-const { alerts, searchState } = useSocket()
+const { alerts, searchState, selectAlert } = useSocket()
+const MAP_APPROVAL_TEXT = '\u5ba1\u56fe\u53f7 GS(2024)1158\u53f7'
 const mapEl = ref(null)
 const mapReady = ref(false)
 const mapError = ref('')
@@ -78,6 +80,7 @@ let map = null
 let heatmap = null
 let infoWindow = null
 let staleTimer = null
+let flyToTimer = null
 let activeInfoTargetKey = ''
 const added = new Map()
 let routeOverlays = []
@@ -175,16 +178,16 @@ function createMarkerElement() {
 }
 
 function mkPopup(sos) {
-  const bt = sos.medicalProfile?.bloodTypeDetail !== undefined
-    ? BLOOD_LABELS[sos.medicalProfile.bloodTypeDetail] ?? '未知'
-    : BLOOD_LABELS[sos.bloodType] ?? '未知'
+  const bt = BLOOD_LABELS[String(getEffectiveBloodType(sos))] ?? '未知'
   const time = new Date(sos.timestamp).toLocaleString('zh-CN')
   const relay = sos.reportedBy?.length ?? 1
   const mp = sos.medicalProfile || {}
   const [lng, lat] = sos.location?.coordinates || [0, 0]
+  const workflow = WORKFLOW_LABELS[sos.workflowStatus] || '待处理'
 
   return `<div class="sos-popup">
     <div class="p-title">⚠ SOS 求救信号</div>
+    <div class="p-row"><span>处置状态</span><span class="hi">${workflow}</span></div>
     <div class="p-row"><span>设备 MAC</span><span>${sos.senderMac}</span></div>
     ${mp.name ? `<div class="p-row"><span>姓名</span><span class="hi-green">${mp.name}</span></div>` : ''}
     ${mp.age ? `<div class="p-row"><span>年龄</span><span>${mp.age}</span></div>` : ''}
@@ -192,6 +195,8 @@ function mkPopup(sos) {
     ${mp.allergies ? `<div class="p-row"><span class="warn">⚠ 过敏</span><span class="hi-orange">${mp.allergies}</span></div>` : ''}
     ${mp.medicalHistory ? `<div class="p-row"><span>病史</span><span>${mp.medicalHistory}</span></div>` : ''}
     ${mp.emergencyContact ? `<div class="p-row"><span>联系人</span><span class="hi-purple">${mp.emergencyContact}</span></div>` : ''}
+    ${sos.dispatchInfo?.teamName ? `<div class="p-row"><span>救援队</span><span class="hi-green">${sos.dispatchInfo.teamName}</span></div>` : ''}
+    ${sos.dispatchInfo?.hospitalName ? `<div class="p-row"><span>目标医院</span><span>${sos.dispatchInfo.hospitalName}</span></div>` : ''}
     <div class="p-row"><span>坐标</span><span class="coord">${lng.toFixed(4)}°E, ${lat.toFixed(4)}°N</span></div>
     <div class="p-row"><span>求救时间</span><span>${time}</span></div>
     <div class="p-row"><span>中继次数</span><span class="hi">${relay} 次</span></div>
@@ -218,8 +223,15 @@ function toggleInfoWindow(targetKey, position, content) {
 }
 
 function addMarker(sos) {
-  const key = `${sos.senderMac}|${sos.timestamp}`
-  if (added.has(key) || !map) return
+  const key = getAlertKey(sos)
+  if (!key || !map) return
+  const existingEntry = added.get(key)
+  if (existingEntry) {
+    existingEntry.sosData = { ...existingEntry.sosData, ...sos }
+    existingEntry.marker.setExtData({ sosData: existingEntry.sosData })
+    return
+  }
+
   const point = toGcjPoint(sos.location?.coordinates)
   if (!point) return
 
@@ -231,19 +243,39 @@ function addMarker(sos) {
     offset: new AMapLib.Pixel(-15, -15),
     zIndex: 130,
   })
-  marker.setExtData({ sosData: sos })
+  const entry = { marker, el: contentEl, sosData: { ...sos } }
+  marker.setExtData({ sosData: entry.sosData })
   marker.on('click', () => {
-    const opened = toggleInfoWindow(`sos:${key}`, point, mkPopup(sos))
+    const currentSos = entry.sosData
+    const currentPoint = toGcjPoint(currentSos.location?.coordinates) || point
+    selectAlert(currentSos)
+    const opened = toggleInfoWindow(`sos:${key}`, currentPoint, mkPopup(currentSos))
     if (opened) {
       const nextZoom = Math.max(map.getZoom() || 5, 15)
-      map.setZoomAndCenter(nextZoom, point, false, 500)
+      map.setZoomAndCenter(nextZoom, currentPoint, false, 500)
     }
   })
   marker.setMap(map)
 
   setTimeout(() => contentEl.classList.add('flash-in'), 50)
-  added.set(key, { marker, el: contentEl, sosData: sos })
+  added.set(key, entry)
   scheduleStaleCheck()
+}
+
+function syncMarkers() {
+  const activeKeys = new Set(alerts.value.map((item) => getAlertKey(item)).filter(Boolean))
+
+  for (const [key, entry] of added.entries()) {
+    if (activeKeys.has(key)) continue
+    if (activeInfoTargetKey === `sos:${key}`) {
+      infoWindow?.close()
+      activeInfoTargetKey = ''
+    }
+    entry.marker?.setMap?.(null)
+    added.delete(key)
+  }
+
+  alerts.value.forEach(addMarker)
 }
 
 function scheduleStaleCheck() {
@@ -730,15 +762,47 @@ function applyMarkerFilterState() {
 
 function flyToSos(sos) {
   if (!map || !sos?.location?.coordinates) return
-  const point = toGcjPoint(sos.location.coordinates)
-  if (!point) return
-  map.setZoomAndCenter(15, point, false, 500)
-
   const key = `${sos.senderMac}|${sos.timestamp}`
   const entry = added.get(key)
+  const markerPosition = entry?.marker?.getPosition?.()
+  const point = markerPosition
+    ? [markerPosition.lng, markerPosition.lat]
+    : toGcjPoint(sos.location.coordinates)
+  if (!point) return
+
   if (entry?.marker) {
-    openInfoWindow(point, mkPopup(entry.sosData))
+    map.setFitView([entry.marker], false, [180, 180, 180, 180])
   }
+
+  if (flyToTimer) {
+    clearTimeout(flyToTimer)
+    flyToTimer = null
+  }
+
+  const currentZoom = Number(map.getZoom?.() || 0)
+  const targetZoom = Math.max(currentZoom, 16)
+  const stageZoom = targetZoom >= 16 ? Math.max(Math.min(targetZoom - 2, 14), 12) : targetZoom
+
+  map.setZoomAndCenter(stageZoom, point, false, 450)
+
+  flyToTimer = setTimeout(() => {
+    if (!map) return
+    map.setZoomAndCenter(targetZoom, point, false, 650)
+
+    flyToTimer = setTimeout(() => {
+      if (!map) return
+      if (entry?.marker) {
+        activeInfoTargetKey = `sos:${key}`
+        openInfoWindow(point, mkPopup(entry.sosData))
+        setTimeout(() => {
+          if (!map) return
+          const settleZoom = Math.max(Number(map.getZoom?.() || 0), targetZoom)
+          map.setZoomAndCenter(settleZoom, point, false, 280)
+        }, 30)
+      }
+      flyToTimer = null
+    }, 520)
+  }, 180)
 }
 
 function handleFlyTo(e) {
@@ -785,7 +849,7 @@ function handleFlyToArea(e) {
 
 watchEffect(() => {
   if (!mapReady.value) return
-  alerts.value.forEach(addMarker)
+  syncMarkers()
   updateHeatmap()
 })
 
@@ -822,6 +886,15 @@ onMounted(async () => {
     rotateEnable: false,
   })
 
+  map.on('complete', () => {
+    try {
+      const mapApprovalNumber = AMapLib?.Map?.mapNumber?.()
+      console.log('[Map] approval number:', mapApprovalNumber || 'unavailable')
+    } catch (error) {
+      console.warn('[Map] approval number lookup failed:', error?.message || error)
+    }
+  })
+
   infoWindow.on('close', () => {
     activeInfoTargetKey = ''
   })
@@ -851,6 +924,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (staleTimer) clearTimeout(staleTimer)
+  if (flyToTimer) clearTimeout(flyToTimer)
   clearAllRouteOverlays()
   window.removeEventListener('map-flyto', handleFlyTo)
   window.removeEventListener('map-show-route', handleShowRoute)
@@ -888,6 +962,23 @@ defineExpose({ flyToSos })
     radial-gradient(circle at 20% 18%, rgba(0, 170, 255, 0.08), transparent 28%),
     radial-gradient(circle at 82% 78%, rgba(0, 255, 217, 0.06), transparent 30%),
     linear-gradient(180deg, rgba(2, 10, 18, 0.06), rgba(2, 10, 18, 0.14));
+}
+
+.map-approval {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 970;
+  padding: 4px 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(0, 200, 255, 0.16);
+  background: rgba(3, 14, 26, 0.82);
+  color: rgba(214, 239, 255, 0.82);
+  font-size: 11px;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.22);
 }
 
 .map-error-panel {

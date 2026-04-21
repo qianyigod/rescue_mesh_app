@@ -69,8 +69,8 @@
               <span v-if="item.medicalProfile?.allergies && item.medicalProfile.allergies !== '无'" class="detail-tag allergy">
                 ⚠ {{ item.medicalProfile.allergies }}
               </span>
-              <span class="detail-tag blood" :style="{ borderColor: bloodColor(item.bloodType) }">
-                {{ bloodLabel(item.bloodType) }}
+              <span class="detail-tag blood" :style="{ borderColor: bloodColor(getEffectiveBloodType(item)) }">
+                {{ bloodLabel(getEffectiveBloodType(item)) }}
               </span>
             </div>
             <div class="priority-breakdown">
@@ -278,9 +278,10 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
-import { BLOOD_LABELS, BLOOD_COLORS } from '../composables/useSocket'
+import { BLOOD_LABELS, BLOOD_COLORS, getEffectiveBloodType, useSocket } from '../composables/useSocket'
 
 const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:3000'
+const { selectAlert } = useSocket()
 
 const tabs = [
   { key: 'priority', label: '🎯 优先级' },
@@ -443,6 +444,7 @@ function flyToArea(area) {
 
 function focusPriorityItem(item) {
   if (!item) return
+  selectAlert(item)
   window.dispatchEvent(new CustomEvent('map-flyto', {
     detail: item,
   }))

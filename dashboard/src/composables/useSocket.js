@@ -21,6 +21,15 @@ export const BLOOD_COLORS = {
   3: '#00E5FF',
 }
 
+export const WORKFLOW_LABELS = {
+  reported: '待接警',
+  acknowledged: '已接警',
+  dispatching: '已派单',
+  on_scene: '现场处置',
+  transferred: '转运中',
+  closed: '已结案',
+}
+
 const connected = ref(false)
 const alerts = ref([])
 const activeCount = ref(0)
@@ -31,6 +40,8 @@ const medicalStats = reactive({
   allergyCount: 0,
   historyCount: 0,
 })
+const selectedAlert = ref(null)
+const selectedAlertKey = ref('')
 
 const searchState = reactive({
   keyword: '',
@@ -43,7 +54,7 @@ const searchState = reactive({
 let socket = null
 const alertKeyIndex = new Map()
 
-function getAlertKey(sos) {
+export function getAlertKey(sos) {
   if (!sos) return ''
   if (sos._id) return String(sos._id)
 
@@ -54,6 +65,14 @@ function getAlertKey(sos) {
     : String(sos.timestamp || '')
 
   return `${senderMac}|${timestamp}`
+}
+
+export function getEffectiveBloodType(sos) {
+  const detailType = sos?.medicalProfile?.bloodTypeDetail
+  if (Number.isInteger(detailType) && detailType >= -1) {
+    return detailType
+  }
+  return Number.isInteger(sos?.bloodType) ? sos.bloodType : -1
 }
 
 function sortAlertsByTimeDesc(list) {
@@ -94,7 +113,7 @@ function recomputeDerivedStats() {
       activeCount.value++
     }
 
-    const bt = String(sos?.bloodType ?? -1)
+    const bt = String(getEffectiveBloodType(sos))
     bloodCounts[bt] = (bloodCounts[bt] || 0) + 1
 
     const mp = sos?.medicalProfile
@@ -124,6 +143,10 @@ function removeAlertByKey(key) {
 function upsertAlert(sos) {
   const key = getAlertKey(sos)
   if (!key) return
+
+  if (selectedAlertKey.value && selectedAlertKey.value === key) {
+    selectedAlert.value = { ...(selectedAlert.value || {}), ...sos }
+  }
 
   if (sos?.status && sos.status !== 'active') {
     removeAlertByKey(key)
@@ -160,6 +183,31 @@ function replaceAlerts(list) {
   alerts.value = sortAlertsByTimeDesc(Array.from(merged.values())).slice(0, MAX_ALERTS)
   rebuildAlertIndex()
   recomputeDerivedStats()
+
+  if (selectedAlertKey.value && merged.has(selectedAlertKey.value)) {
+    selectedAlert.value = { ...(selectedAlert.value || {}), ...merged.get(selectedAlertKey.value) }
+  }
+}
+
+function selectAlert(sos) {
+  const key = getAlertKey(sos)
+  if (!key) return
+
+  selectedAlertKey.value = key
+  selectedAlert.value = { ...(selectedAlert.value || {}), ...sos }
+}
+
+function setSelectedAlertSnapshot(sos) {
+  const key = getAlertKey(sos)
+  if (!key) return
+
+  selectedAlertKey.value = key
+  selectedAlert.value = { ...(selectedAlert.value || {}), ...sos }
+}
+
+function clearSelectedAlert() {
+  selectedAlertKey.value = ''
+  selectedAlert.value = null
 }
 
 export function useSocket() {
@@ -169,6 +217,7 @@ export function useSocket() {
     socket.on('connect', () => { connected.value = true })
     socket.on('disconnect', () => { connected.value = false })
     socket.on('new_sos_alert', upsertAlert)
+    socket.on('sos_updated', upsertAlert)
   }
 
   async function fetchActive() {
@@ -205,11 +254,16 @@ export function useSocket() {
     bloodCounts,
     hourlyCounts,
     medicalStats,
+    selectedAlert,
+    selectedAlertKey,
     searchState,
     connect,
     fetchActive,
     fetchHourlyStats,
     disconnect,
     upsertAlert,
+    selectAlert,
+    setSelectedAlertSnapshot,
+    clearSelectedAlert,
   }
 }

@@ -11,14 +11,18 @@ const socketService = require('./socket');
 const app = express();
 const server = http.createServer(app);
 
+const corsOrigin = process.env.CORS_ORIGIN || '*';
+
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: corsOrigin,
+}));
 app.use(express.json());
 
 // Socket.io setup
 const io = new Server(server, {
   cors: {
-    origin: '*',
+    origin: corsOrigin,
     methods: ['GET', 'POST']
   }
 });
@@ -34,8 +38,26 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.use('/api', (req, res) => {
+  return res.status(404).json({
+    error: `接口不存在: ${req.method} ${req.originalUrl}`,
+  });
+});
+
+app.use((err, req, res, next) => {
+  if (err?.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: '请求体 JSON 解析失败' });
+  }
+
+  console.error('[Server] Unhandled error:', err);
+  return res.status(500).json({ error: '服务器内部错误' });
+});
+
 // MongoDB connection
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/rescue_mesh';
+const MONGODB_URI =
+  process.env.MONGODB_URI
+  || process.env.MONGO_URI
+  || 'mongodb://localhost:27017/rescue_mesh';
 const PORT = process.env.PORT || 3000;
 
 mongoose.connect(MONGODB_URI)

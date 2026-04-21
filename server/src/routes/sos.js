@@ -1,6 +1,8 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const router = express.Router();
 const SosRecord = require('../models/SosRecord');
+const DispatchRecord = require('../models/DispatchRecord');
 const socketService = require('../socket');
 const { rankSosList, detectRiskAreas } = require('../utils/priorityEngine');
 const { generateSituationReport, answerQuestion } = require('../services/llmService');
@@ -16,6 +18,105 @@ const { wgs84ToGcj02 } = require('../utils/coordTransform');
 
 // 去重时间容差：10 分钟（毫秒）
 const DEDUP_WINDOW_MS = 10 * 60 * 1000;
+
+function sanitizeOperatorName(value, fallback = 'Dispatcher') {
+  const name = String(value || '').trim();
+  return name || fallback;
+}
+
+function sanitizeFreeText(value) {
+  return String(value || '').trim();
+}
+
+function sanitizeEtaMinutes(value) {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function mergeMedicalProfile(existingProfile = {}, incomingProfile = {}) {
+  const existing = existingProfile || {};
+  const incoming = incomingProfile || {};
+
+  return {
+    name: sanitizeFreeText(incoming.name) || sanitizeFreeText(existing.name),
+    age: sanitizeFreeText(incoming.age) || sanitizeFreeText(existing.age),
+    bloodTypeDetail: Number.isInteger(incoming.bloodTypeDetail) && incoming.bloodTypeDetail >= -1
+      ? incoming.bloodTypeDetail
+      : (Number.isInteger(existing.bloodTypeDetail) ? existing.bloodTypeDetail : -1),
+    medicalHistory: sanitizeFreeText(incoming.medicalHistory) || sanitizeFreeText(existing.medicalHistory),
+    allergies: sanitizeFreeText(incoming.allergies) || sanitizeFreeText(existing.allergies),
+    emergencyContact: sanitizeFreeText(incoming.emergencyContact) || sanitizeFreeText(existing.emergencyContact),
+  };
+}
+
+async function createDispatchRecord(sosDoc, {
+  actionType,
+  actorType = 'dispatcher',
+  actorName = '',
+  note = '',
+  meta = {},
+} = {}) {
+  if (!sosDoc?._id || !actionType) {
+    return null;
+  }
+
+  return DispatchRecord.create({
+    sosRecordId: sosDoc._id,
+    actionType,
+    actorType,
+    actorName: sanitizeFreeText(actorName),
+    note: sanitizeFreeText(note),
+    meta: {
+      workflowStatus: meta.workflowStatus || sosDoc.workflowStatus || '',
+      status: meta.status || sosDoc.status || '',
+      muleId: sanitizeFreeText(meta.muleId),
+      teamName: sanitizeFreeText(meta.teamName),
+      hospitalName: sanitizeFreeText(meta.hospitalName),
+      etaMinutes: sanitizeEtaMinutes(meta.etaMinutes),
+      resultStatus: sanitizeFreeText(meta.resultStatus),
+    },
+  });
+}
+
+async function findSosRecordById(id) {
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return null;
+  }
+
+  return SosRecord.findById(id);
+}
+
+function buildSyntheticTimeline(record) {
+  if (!record) {
+    return [];
+  }
+
+  return [{
+    _id: `synthetic-reported-${record._id}`,
+    actionType: 'reported',
+    actorType: 'system',
+    actorName: 'system',
+    note: 'case created',
+    createdAt: record.createdAt || record.timestamp,
+    meta: {
+      workflowStatus: record.workflowStatus || 'reported',
+      status: record.status || 'active',
+      muleId: Array.isArray(record.reportedBy) ? (record.reportedBy[0] || '') : '',
+      teamName: record.dispatchInfo?.teamName || '',
+      hospitalName: record.dispatchInfo?.hospitalName || '',
+      etaMinutes: record.dispatchInfo?.etaMinutes ?? null,
+      resultStatus: record.closureInfo?.resultStatus || '',
+    },
+  }];
+}
 
 /**
  * POST /api/sos/sync
@@ -119,6 +220,191 @@ router.get('/active', async (req, res) => {
   } catch (err) {
     console.error('[GET /active]', err);
     return res.status(500).json({ error: '服务器内部错误' });
+  }
+});
+
+router.get('/:id/detail', async (req, res) => {
+  try {
+    const sosRecord = await findSosRecordById(req.params.id);
+    if (!sosRecord) {
+      return res.status(404).json({ error: '未找到对应案件' });
+    }
+
+    const timeline = await DispatchRecord.find({ sosRecordId: sosRecord._id })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.status(200).json({
+      data: {
+        sos: sosRecord.toJSON(),
+        timeline: timeline.length > 0 ? timeline : buildSyntheticTimeline(sosRecord.toJSON()),
+      },
+    });
+  } catch (err) {
+    console.error('[GET /:id/detail]', err);
+    return res.status(500).json({ error: '获取案件详情失败' });
+  }
+});
+
+router.post('/:id/acknowledge', async (req, res) => {
+  try {
+    const sosRecord = await findSosRecordById(req.params.id);
+    if (!sosRecord) {
+      return res.status(404).json({ error: '未找到对应案件' });
+    }
+    if (sosRecord.status !== 'active') {
+      return res.status(400).json({ error: '当前案件已结案，无法接警' });
+    }
+
+    const operatorName = sanitizeOperatorName(req.body?.operatorName);
+    const note = sanitizeFreeText(req.body?.note);
+    const now = new Date();
+
+    if (sosRecord.workflowStatus === 'reported') {
+      sosRecord.workflowStatus = 'acknowledged';
+    }
+    if (!sosRecord.acknowledgedAt) {
+      sosRecord.acknowledgedAt = now;
+    }
+    if (!sosRecord.acknowledgedBy) {
+      sosRecord.acknowledgedBy = operatorName;
+    }
+
+    await sosRecord.save();
+    const timelineItem = await createDispatchRecord(sosRecord, {
+      actionType: 'acknowledged',
+      actorType: 'dispatcher',
+      actorName: operatorName,
+      note,
+    });
+
+    socketService.broadcastSosUpdate(sosRecord);
+
+    return res.status(200).json({
+      data: {
+        sos: sosRecord.toJSON(),
+        timelineItem,
+      },
+    });
+  } catch (err) {
+    console.error('[POST /:id/acknowledge]', err);
+    return res.status(500).json({ error: '接警失败' });
+  }
+});
+
+router.post('/:id/dispatch', async (req, res) => {
+  try {
+    const sosRecord = await findSosRecordById(req.params.id);
+    if (!sosRecord) {
+      return res.status(404).json({ error: '未找到对应案件' });
+    }
+    if (sosRecord.status !== 'active') {
+      return res.status(400).json({ error: '当前案件已结案，无法派单' });
+    }
+
+    const teamName = sanitizeFreeText(req.body?.teamName);
+    if (!teamName) {
+      return res.status(400).json({ error: 'teamName 为必填项' });
+    }
+
+    const operatorName = sanitizeOperatorName(req.body?.operatorName);
+    const hospitalName = sanitizeFreeText(req.body?.hospitalName);
+    const etaMinutes = sanitizeEtaMinutes(req.body?.etaMinutes);
+    const note = sanitizeFreeText(req.body?.note);
+    const now = new Date();
+
+    if (!sosRecord.acknowledgedAt) {
+      sosRecord.acknowledgedAt = now;
+      sosRecord.acknowledgedBy = operatorName;
+    }
+
+    sosRecord.workflowStatus = 'dispatching';
+    sosRecord.dispatchInfo = {
+      teamName,
+      hospitalName,
+      etaMinutes,
+      note,
+      dispatchedAt: now,
+      dispatchedBy: operatorName,
+    };
+
+    await sosRecord.save();
+    const timelineItem = await createDispatchRecord(sosRecord, {
+      actionType: 'dispatch',
+      actorType: 'dispatcher',
+      actorName: operatorName,
+      note,
+      meta: {
+        teamName,
+        hospitalName,
+        etaMinutes,
+      },
+    });
+
+    socketService.broadcastSosUpdate(sosRecord);
+
+    return res.status(200).json({
+      data: {
+        sos: sosRecord.toJSON(),
+        timelineItem,
+      },
+    });
+  } catch (err) {
+    console.error('[POST /:id/dispatch]', err);
+    return res.status(500).json({ error: '派单失败' });
+  }
+});
+
+router.post('/:id/close', async (req, res) => {
+  try {
+    const sosRecord = await findSosRecordById(req.params.id);
+    if (!sosRecord) {
+      return res.status(404).json({ error: '未找到对应案件' });
+    }
+    if (sosRecord.status !== 'active') {
+      return res.status(400).json({ error: '当前案件已结案，无需重复操作' });
+    }
+
+    const resultStatus = sanitizeFreeText(req.body?.resultStatus) || 'rescued';
+    if (!['rescued', 'false_alarm'].includes(resultStatus)) {
+      return res.status(400).json({ error: 'resultStatus 仅支持 rescued 或 false_alarm' });
+    }
+
+    const operatorName = sanitizeOperatorName(req.body?.operatorName);
+    const note = sanitizeFreeText(req.body?.note);
+    const now = new Date();
+
+    sosRecord.status = resultStatus;
+    sosRecord.workflowStatus = 'closed';
+    sosRecord.closureInfo = {
+      closedAt: now,
+      closedBy: operatorName,
+      note,
+      resultStatus,
+    };
+
+    await sosRecord.save();
+    const timelineItem = await createDispatchRecord(sosRecord, {
+      actionType: 'closed',
+      actorType: 'dispatcher',
+      actorName: operatorName,
+      note,
+      meta: {
+        resultStatus,
+      },
+    });
+
+    socketService.broadcastSosUpdate(sosRecord);
+
+    return res.status(200).json({
+      data: {
+        sos: sosRecord.toJSON(),
+        timelineItem,
+      },
+    });
+  } catch (err) {
+    console.error('[POST /:id/close]', err);
+    return res.status(500).json({ error: '结案失败' });
   }
 });
 
@@ -888,30 +1174,63 @@ async function upsertSosRecord(record, muleId, medicalProfile = {}) {
   });
 
   if (existing) {
-    // 已存在：追加骡子 MAC，提升置信度
-    await SosRecord.updateOne(
-      { _id: existing._id },
-      { 
-        $addToSet: { reportedBy: muleId },
-        // 如果有新的医疗档案信息，也更新
-        ...(Object.keys(medicalProfile).length > 0 && {
-          $set: { medicalProfile }
-        })
-      }
-    );
-    existing.reportedBy = [...new Set([...existing.reportedBy, muleId])];
-    if (Object.keys(medicalProfile).length > 0) {
-      existing.medicalProfile = medicalProfile;
+    const mergedMedicalProfile = mergeMedicalProfile(existing.medicalProfile, medicalProfile);
+    const hadRelay = existing.reportedBy.includes(muleId);
+    const hasMedicalProfileUpdate = JSON.stringify(existing.medicalProfile || {}) !== JSON.stringify(mergedMedicalProfile);
+    const updatePayload = {
+      $addToSet: { reportedBy: muleId },
+    };
+
+    if (hasMedicalProfileUpdate) {
+      updatePayload.$set = { medicalProfile: mergedMedicalProfile };
     }
+
+    await SosRecord.updateOne({ _id: existing._id }, updatePayload);
+    existing.reportedBy = [...new Set([...existing.reportedBy, muleId])];
+    if (hasMedicalProfileUpdate) {
+      existing.medicalProfile = mergedMedicalProfile;
+    }
+
+    if (!hadRelay || hasMedicalProfileUpdate) {
+      await createDispatchRecord(existing, {
+        actionType: 'relay_merged',
+        actorType: 'relay',
+        actorName: muleId,
+        note: hasMedicalProfileUpdate ? 'relay merged with profile update' : 'relay merged',
+        meta: {
+          muleId,
+        },
+      });
+    }
+
     return { action: 'merged', doc: existing };
   }
 
-  // 全新求救：插入并广播
+  const nextMedicalProfile = mergeMedicalProfile({}, medicalProfile);
+  const hasMedicalProfile = Object.values(nextMedicalProfile).some((value) => {
+    if (typeof value === 'number') {
+      return value >= 0;
+    }
+    return !!sanitizeFreeText(value);
+  });
+
   const newDoc = await SosRecord.create({
     ...record,
+    workflowStatus: 'reported',
     reportedBy: [muleId],
-    medicalProfile: Object.keys(medicalProfile).length > 0 ? medicalProfile : undefined,
+    medicalProfile: hasMedicalProfile ? nextMedicalProfile : undefined,
   });
+
+  await createDispatchRecord(newDoc, {
+    actionType: 'reported',
+    actorType: 'relay',
+    actorName: muleId,
+    note: 'new sos reported',
+    meta: {
+      muleId,
+    },
+  });
+
   return { action: 'created', doc: newDoc };
 }
 

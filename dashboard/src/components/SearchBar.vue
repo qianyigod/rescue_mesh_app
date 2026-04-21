@@ -48,10 +48,10 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { useSocket, BLOOD_LABELS } from '../composables/useSocket'
+import { ref, computed } from 'vue'
+import { useSocket, BLOOD_LABELS, getAlertKey, getEffectiveBloodType } from '../composables/useSocket'
 
-const { alerts, searchState } = useSocket()
+const { alerts, searchState, selectAlert } = useSocket()
 
 const keyword = ref('')
 const bloodFilter = ref('')
@@ -86,7 +86,7 @@ const CITIES = {
 // 搜索结果计算
 const results = computed(() => {
   const kw = keyword.value.trim().toLowerCase()
-  if (!kw && !bloodFilter.value && !statusFilter.value && !timeFilter.value) return []
+  if (!kw && !bloodFilter.value && !timeFilter.value) return []
 
   // 预计算：关键词是否命中某个城市
   const matchedCities = Object.entries(CITIES).filter(([city]) =>
@@ -117,7 +117,7 @@ const results = computed(() => {
     }
 
     // 血型过滤
-    if (bloodFilter.value && String(sos.bloodType) !== bloodFilter.value) return false
+    if (bloodFilter.value && String(getEffectiveBloodType(sos)) !== bloodFilter.value) return false
 
     // 时间过滤
     if (timeFilter.value) {
@@ -134,8 +134,8 @@ const results = computed(() => {
     const [lng, lat] = sos.location?.coordinates || [0, 0]
     const region = findNearestCity(lat, lng)
     const label = mp.name || sos.senderMac?.slice(-4) || '未知'
-    const meta = `${region} · ${BLOOD_LABELS[String(sos.bloodType)] || '未知'} · ${sos.status === 'active' ? '待救援' : sos.status === 'rescued' ? '已救出' : '误报'}`
-    return { key: `${sos.senderMac}|${sos.timestamp}`, label, meta, sos }
+    const meta = `${region} · ${BLOOD_LABELS[String(getEffectiveBloodType(sos))] || '未知'} · ${sos.status === 'active' ? '待救援' : sos.status === 'rescued' ? '已救出' : '误报'}`
+    return { key: getAlertKey(sos), label, meta, sos }
   })
 })
 
@@ -184,6 +184,7 @@ function selectResult(item) {
   showDropdown.value = false
   keyword.value = item.label
   syncSearchState()
+  selectAlert(item.sos)
   // 通知地图飞到目标
   window.dispatchEvent(new CustomEvent('map-flyto', { detail: item.sos }))
 }

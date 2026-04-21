@@ -21,6 +21,7 @@
         <AIPanel />
       </div>
     </main>
+    <CaseDrawer />
   </div>
 </template>
 
@@ -32,6 +33,7 @@ import MapComponent  from './components/MapComponent.vue'
 import StatsComponent from './components/StatsComponent.vue'
 import SearchBar     from './components/SearchBar.vue'
 import AIPanel       from './components/AIPanel.vue'
+import CaseDrawer    from './components/CaseDrawer.vue'
 
 const { connected, activeCount, connect, fetchActive, fetchHourlyStats, disconnect } = useSocket()
 
@@ -60,6 +62,7 @@ onUnmounted(() => {
 
 <style scoped>
 .screen {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100vh;
