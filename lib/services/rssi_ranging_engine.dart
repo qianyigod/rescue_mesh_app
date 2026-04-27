@@ -35,9 +35,14 @@ class RssiRangingEngine {
   double _kalmanEstimate = 0;
   double _kalmanError = 1;
 
+  // 距离平滑状态
+  double? _smoothedDistance;
+
   /// RSSI 滑动窗口（用于计算稳定性和置信度）
   final List<int> _rssiHistory = [];
   static const int _maxHistorySize = 20;
+  static const int _minRssi = -100;
+  static const int _maxRssi = -20;
 
   /// 静态实例 — 全局共享滤波器状态
   static final RssiRangingEngine _instance = RssiRangingEngine(
@@ -50,24 +55,29 @@ class RssiRangingEngine {
 
   factory RssiRangingEngine.instance() => _instance;
 
-  /// 根据 RSSI 估算距离（米）— 使用卡尔曼滤波
+  /// 根据 RSSI 估算距离（米）— 使用卡尔曼滤波 + 距离平滑
   RangingResult estimateDistance(int rssi) {
+    final normalizedRssi = _normalizeRssi(rssi);
+
     // 1. 卡尔曼滤波
-    final filteredRssi = _applyKalmanFilter(rssi);
+    final filteredRssi = _applyKalmanFilter(normalizedRssi);
 
     // 2. 对数距离路径损耗模型
-    final distance = _logDistancePathLossModel(filteredRssi);
+    final rawDistance = _logDistancePathLossModel(filteredRssi);
 
-    // 3. 计算置信度
-    final confidence = _calculateConfidence(rssi);
+    // 3. 更新历史（先更新，置信度能包含本次采样）
+    _updateHistory(normalizedRssi);
 
-    // 4. 更新历史
-    _updateHistory(rssi);
+    // 4. 计算置信度
+    final confidence = _calculateConfidence(normalizedRssi);
+
+    // 5. 根据置信度做距离平滑
+    final smoothedDistance = _applyDistanceSmoothing(rawDistance, confidence);
 
     return RangingResult(
-      rawRssi: rssi,
+      rawRssi: normalizedRssi,
       filteredRssi: filteredRssi,
-      estimatedDistance: distance,
+      estimatedDistance: smoothedDistance,
       confidence: confidence,
       environmentFactor: environmentFactor,
     );
@@ -80,13 +90,14 @@ class RssiRangingEngine {
     double environmentFactor = 2.2,
     double referenceDistance = 1.0,
   }) {
-    if (rssi == 0) return double.infinity;
+    final normalizedRssi = rssi.clamp(_minRssi, _maxRssi);
 
-    final pathLoss = txPower - rssi;
+    final pathLoss = txPower - normalizedRssi;
     if (pathLoss <= 0) return referenceDistance;
 
     final exponent = pathLoss / (10 * environmentFactor);
-    return referenceDistance * math.pow(10, exponent);
+    final distance = referenceDistance * math.pow(10, exponent);
+    return distance.clamp(0.5, 150.0);
   }
 
   /// 卡尔曼滤波 — 一维 RSSI 滤波
@@ -111,7 +122,7 @@ class RssiRangingEngine {
     _kalmanError = (1 - kalmanGain) * _kalmanError + kalmanProcessNoise;
 
     // 限制 RSSI 在合理范围内
-    _kalmanEstimate = _kalmanEstimate.clamp(-100.0, -20.0);
+    _kalmanEstimate = _kalmanEstimate.clamp(_minRssi.toDouble(), _maxRssi.toDouble());
 
     _filteredRssi = _kalmanEstimate;
     return _kalmanEstimate;
@@ -129,6 +140,25 @@ class RssiRangingEngine {
 
     // 限制最大合理距离（BLE 有效范围通常 < 100 米）
     return distance.clamp(0.5, 150.0);
+  }
+
+  int _normalizeRssi(int rssi) {
+    return rssi.clamp(_minRssi, _maxRssi);
+  }
+
+  double _applyDistanceSmoothing(double currentDistance, double confidence) {
+    final smoothingFactor = (0.15 + (1 - confidence) * 0.5).clamp(0.15, 0.65);
+
+    final previousDistance = _smoothedDistance;
+    if (previousDistance == null) {
+      _smoothedDistance = currentDistance;
+      return currentDistance;
+    }
+
+    final nextDistance =
+        previousDistance + smoothingFactor * (currentDistance - previousDistance);
+    _smoothedDistance = nextDistance;
+    return nextDistance;
   }
 
   /// 计算距离估算的置信度（0.0 - 1.0）
@@ -178,6 +208,7 @@ class RssiRangingEngine {
     _filteredRssi = null;
     _kalmanEstimate = 0;
     _kalmanError = 1;
+    _smoothedDistance = null;
     _rssiHistory.clear();
   }
 

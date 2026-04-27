@@ -148,7 +148,7 @@ function upsertAlert(sos) {
     selectedAlert.value = { ...(selectedAlert.value || {}), ...sos }
   }
 
-  if (sos?.status && sos.status !== 'active') {
+  if ((sos?.status && sos.status !== 'active') || sos?.workflowStatus === 'closed') {
     removeAlertByKey(key)
     return
   }

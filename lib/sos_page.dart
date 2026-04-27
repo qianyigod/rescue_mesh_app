@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+
 import 'models/emergency_profile.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
@@ -6,63 +7,83 @@ import 'services/sos_trigger_service.dart';
 import 'theme/rescue_theme.dart';
 
 class SosPage extends StatefulWidget {
-  const SosPage({super.key});
+  SosPage({
+    super.key,
+    BleMeshService? bleService,
+    SosTriggerService? triggerService,
+  }) : bleService = bleService ?? bleMeshService,
+       triggerService = triggerService ?? sosTriggerService;
+
+  final BleMeshService bleService;
+  final SosTriggerService triggerService;
 
   @override
   State<SosPage> createState() => _SosPageState();
 }
 
 class _SosPageState extends State<SosPage> {
-  String _statusText = '等待生成 SOS 数据包并加入 BLE Mesh 广播。';
+  String _statusText = '等待发起 SOS 广播。系统会优先尝试实时定位，失败后再询问是否使用缓存坐标。';
   bool _isLocating = false;
 
   Future<void> _triggerSos() async {
-    if (_isLocating || bleMeshService.isBroadcastingNow) {
+    if (_isLocating || widget.bleService.isBroadcastingNow) {
       return;
     }
 
     setState(() {
       _isLocating = true;
-      _statusText = '??????????? SOS...';
+      _statusText = '正在尝试获取实时位置并准备 SOS...';
     });
 
     try {
-      final result = await sosTriggerService.triggerSos(
-        bleService: bleMeshService,
+      final resolution = await widget.triggerService.resolveLocationForSos();
+      if (resolution.requiresCacheConfirmation) {
+        final confirmed = await _confirmUseCachedLocation(resolution);
+        if (!mounted) {
+          return;
+        }
+        if (!confirmed) {
+          setState(() {
+            _statusText = '已取消发送 SOS，等待重新定位。';
+          });
+          return;
+        }
+      }
+
+      final result = await widget.triggerService.sendResolvedSos(
+        bleService: widget.bleService,
         bloodType: EmergencyProfile.current.bloodType,
+        resolution: resolution,
       );
 
       if (!mounted) {
         return;
       }
 
+      final locationSourceLabel = resolution.requiresCacheConfirmation
+          ? '使用缓存坐标'
+          : '使用实时坐标';
       setState(() {
         if (result.uploadedToCommandCenter && result.broadcastStarted) {
           _statusText = '''
-SOS ??????????????
-??: ${result.latitude.toStringAsFixed(5)}
-??: ${result.longitude.toStringAsFixed(5)}
-??? ${result.uploadedCount} ????
+SOS 已广播并上传到指挥中心
+$locationSourceLabel
+纬度: ${result.latitude.toStringAsFixed(5)}
+经度: ${result.longitude.toStringAsFixed(5)}
 '''.trim();
         } else if (result.uploadedToCommandCenter && result.bleError != null) {
-          _statusText =
-              'SOS ???????????? BLE ?????${result.bleError}';
+          _statusText = 'SOS 已上传到指挥中心，但 BLE 广播失败：${result.bleError}';
         } else if (result.syncError != null && result.broadcastStarted) {
-          _statusText = '''
-SOS ????????????${result.syncError}
-?????????????????
-'''.trim();
+          _statusText = 'SOS 已广播，但联网同步失败：${result.syncError}';
         } else if (result.syncError != null && result.bleError != null) {
-          _statusText = '''
-SOS ???????? BLE ????????????
-BLE?${result.bleError}
-???${result.syncError}
-'''.trim();
+          _statusText =
+              'SOS 已写入本地，但 BLE 广播和联网同步都失败。BLE：${result.bleError}；网络：${result.syncError}';
         } else {
           _statusText = '''
-SOS ????
-??: ${result.latitude.toStringAsFixed(5)}
-??: ${result.longitude.toStringAsFixed(5)}
+SOS 已保存到本地
+$locationSourceLabel
+纬度: ${result.latitude.toStringAsFixed(5)}
+经度: ${result.longitude.toStringAsFixed(5)}
 '''.trim();
         }
       });
@@ -71,14 +92,14 @@ SOS ????
         return;
       }
       setState(() {
-        _statusText = 'SOS ????: ${error.message}';
+        _statusText = 'SOS 发起失败：${error.message}';
       });
     } catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
-        _statusText = '???????: $error';
+        _statusText = 'SOS 发起失败：$error';
       });
     } finally {
       if (mounted) {
@@ -91,31 +112,73 @@ SOS ????
 
   Future<void> _stopBroadcast() async {
     try {
-      await bleMeshService.stopSosBroadcast();
+      await widget.bleService.stopSosBroadcast();
       if (!mounted) {
         return;
       }
       setState(() {
-        _statusText = 'BLE SOS 广播已停止，本地 Drift 记录仍然保留。';
+        _statusText = 'BLE SOS 广播已停止，本地记录仍然保留。';
       });
     } on BleMeshException catch (error) {
       if (!mounted) {
         return;
       }
       setState(() {
-        _statusText = '停止广播失败: ${error.message}';
+        _statusText = '停止广播失败：${error.message}';
       });
     }
+  }
+
+  Future<bool> _confirmUseCachedLocation(SosLocationResolution resolution) async {
+    final cachedAtText = resolution.cachedAt == null
+        ? '未知'
+        : _formatDateTime(resolution.cachedAt!);
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('实时定位失败'),
+          content: Text(
+            '没有拿到新的实时坐标。\n'
+            '是否使用最近一次缓存坐标继续发送 SOS？\n\n'
+            '缓存时间：$cachedAtText\n'
+            '纬度：${resolution.latitude.toStringAsFixed(5)}\n'
+            '经度：${resolution.longitude.toStringAsFixed(5)}\n\n'
+            '${resolution.failureReason ?? ''}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('使用缓存坐标发送'),
+            ),
+          ],
+        );
+      },
+    );
+    return result ?? false;
+  }
+
+  String _formatDateTime(DateTime value) {
+    String twoDigits(int number) {
+      return number.toString().padLeft(2, '0');
+    }
+
+    return '${value.year}-${twoDigits(value.month)}-${twoDigits(value.day)} '
+        '${twoDigits(value.hour)}:${twoDigits(value.minute)}:${twoDigits(value.second)}';
   }
 
   @override
   Widget build(BuildContext context) {
     return AnimatedBuilder(
-      animation: bleMeshService,
+      animation: widget.bleService,
       builder: (context, _) {
         return StreamBuilder<bool>(
-          stream: bleMeshService.isBroadcasting,
-          initialData: bleMeshService.isBroadcastingNow,
+          stream: widget.bleService.isBroadcasting,
+          initialData: widget.bleService.isBroadcastingNow,
           builder: (context, snapshot) {
             final isBroadcasting = snapshot.data ?? false;
             return Container(
@@ -132,11 +195,11 @@ SOS ????
                   children: [
                     _StatusBanner(
                       title: 'Mesh 链路',
-                      value: bleMeshService.isAdapterReady ? '在线' : '离线',
-                      tone: bleMeshService.isAdapterReady
+                      value: widget.bleService.isAdapterReady ? '在线' : '离线',
+                      tone: widget.bleService.isAdapterReady
                           ? RescuePalette.success
                           : RescuePalette.critical,
-                      subtitle: bleMeshService.permissionsGranted
+                      subtitle: widget.bleService.permissionsGranted
                           ? 'Android 12+ 蓝牙与定位权限已就绪'
                           : '仍缺少蓝牙广播所需运行时权限',
                     ),
@@ -148,14 +211,14 @@ SOS ????
                           ? RescuePalette.critical
                           : RescuePalette.textMuted,
                       subtitle: isBroadcasting
-                          ? 'Manufacturer Data 正在发射 SOS 信号'
+                          ? 'Manufacturer Data 正在发送 SOS 信号'
                           : '点击 SOS 按钮开始广播求救数据',
                     ),
                     const SizedBox(height: 16),
                     _StatusBanner(
                       title: '中继模式',
-                      value: bleMeshService.relayEnabled ? '已启用' : '已停用',
-                      tone: bleMeshService.relayEnabled
+                      value: widget.bleService.relayEnabled ? '已启用' : '已停用',
+                      tone: widget.bleService.relayEnabled
                           ? RescuePalette.accent
                           : RescuePalette.textMuted,
                       subtitle: '本机可作为离线蓝牙 Mesh 节点待命',
@@ -244,12 +307,12 @@ SOS ????
                               alignment: WrapAlignment.center,
                               children: [
                                 FilledButton.tonal(
-                                  onPressed: bleMeshService.init,
+                                  onPressed: widget.bleService.init,
                                   child: const Text('初始化 BLE'),
                                 ),
                                 OutlinedButton(
                                   onPressed:
-                                      bleMeshService.ensureRuntimePermissions,
+                                      widget.bleService.ensureRuntimePermissions,
                                   child: const Text('检查权限'),
                                 ),
                                 if (isBroadcasting)
@@ -259,10 +322,10 @@ SOS ????
                                   ),
                               ],
                             ),
-                            if (bleMeshService.lastError != null) ...[
+                            if (widget.bleService.lastError != null) ...[
                               const SizedBox(height: 12),
                               Text(
-                                bleMeshService.lastError!,
+                                widget.bleService.lastError!,
                                 textAlign: TextAlign.center,
                                 style: Theme.of(context).textTheme.bodySmall
                                     ?.copyWith(color: RescuePalette.critical),

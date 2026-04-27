@@ -50,11 +50,13 @@ class NetworkSyncService extends ChangeNotifier {
   final ConnectivityStatusSnapshotProvider? _connectivitySnapshotProvider;
 
   StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
+  StreamSubscription<List<StoredSosMessage>>? _storedMessagesSubscription;
   NetworkSyncException? _lastException;
   DateTime? _lastSuccessfulSyncAt;
   bool _isListening = false;
   bool _isSyncing = false;
   bool _hasNetwork = false;
+  bool _resyncRequestedWhileSyncing = false;
 
   bool get isListening => _isListening;
   bool get isSyncing => _isSyncing;
@@ -90,10 +92,26 @@ class NetworkSyncService extends ChangeNotifier {
         },
       );
 
+      _storedMessagesSubscription = _database.watchStoredSosMessages().listen(
+        _handleStoredMessagesChanged,
+        onError: (Object error) {
+          _setException(
+            NetworkSyncUnexpectedException(
+              details: error,
+              message: 'Failed to watch local SOS records for sync.',
+            ),
+          );
+        },
+      );
+
       if (_hasNetwork) {
         unawaited(syncNow());
       }
     } catch (error) {
+      await _connectivitySubscription?.cancel();
+      _connectivitySubscription = null;
+      await _storedMessagesSubscription?.cancel();
+      _storedMessagesSubscription = null;
       _isListening = false;
       final exception = NetworkSyncUnexpectedException(
         details: error,
@@ -106,8 +124,9 @@ class NetworkSyncService extends ChangeNotifier {
 
   Future<int> syncNow() async {
     if (_isSyncing) {
+      _resyncRequestedWhileSyncing = true;
       debugPrint(
-        '[NetworkSync] Sync already running, skipping duplicate call.',
+        '[NetworkSync] Sync already running, queueing one follow-up sync.',
       );
       return 0;
     }
@@ -124,6 +143,7 @@ class NetworkSyncService extends ChangeNotifier {
     }
 
     _isSyncing = true;
+    _resyncRequestedWhileSyncing = false;
     _setException(null);
     notifyListeners();
 
@@ -216,14 +236,41 @@ class NetworkSyncService extends ChangeNotifier {
     } finally {
       _isSyncing = false;
       notifyListeners();
+      if (_resyncRequestedWhileSyncing && _hasNetwork) {
+        _resyncRequestedWhileSyncing = false;
+        unawaited(syncNow());
+      }
     }
   }
 
   Future<void> stopListening() async {
     await _connectivitySubscription?.cancel();
     _connectivitySubscription = null;
+    await _storedMessagesSubscription?.cancel();
+    _storedMessagesSubscription = null;
     _isListening = false;
     notifyListeners();
+  }
+
+  void _handleStoredMessagesChanged(List<StoredSosMessage> records) {
+    if (!_hasNetwork || records.isEmpty) {
+      return;
+    }
+
+    final hasPendingUploads = records.any((record) => !record.isUploaded);
+    if (!hasPendingUploads) {
+      return;
+    }
+
+    if (_isSyncing) {
+      _resyncRequestedWhileSyncing = true;
+      return;
+    }
+
+    debugPrint(
+      '[NetworkSync] Local SOS records updated with pending items, triggering sync.',
+    );
+    unawaited(syncNow());
   }
 
   void _handleConnectivityChanged(List<ConnectivityResult> statuses) {

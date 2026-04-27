@@ -39,7 +39,6 @@ class SosMessages extends Table {
   DateTimeColumn get timestamp => dateTime()();
   BoolColumn get isUploaded => boolean().withDefault(const Constant(false))();
 
-  @override
   List<Set<Column>> get indices => [
     {isUploaded}, // 加速 getPendingUploads() 查询
     {senderMac, timestamp}, // 加速 saveIncomingSos() 去重查询
@@ -73,6 +72,11 @@ class AppDatabase extends _$AppDatabase {
 
   static const String _sosMessagesTableName = 'sos_messages';
   static const Duration _dedupeWindow = Duration(minutes: 5);
+  static const Duration _legacyDuplicateWindow = Duration(minutes: 10);
+  static final RegExp _bleAddressPattern = RegExp(
+    r'^[0-9A-F]{2}(:[0-9A-F]{2}){5}$',
+    caseSensitive: false,
+  );
   final StreamController<List<StoredSosMessage>> _storedMessagesController =
       StreamController<List<StoredSosMessage>>.broadcast();
 
@@ -134,7 +138,7 @@ class AppDatabase extends _$AppDatabase {
         longitude: longitude,
         bloodType: bloodType,
         timestamp: DateTime.now(),
-        isUploaded: Value(false),
+        isUploaded: const Value(false),
       ),
     );
   }
@@ -214,7 +218,7 @@ class AppDatabase extends _$AppDatabase {
       LIMIT 1
       ''',
       variables: [
-        Variable<String>(message.remoteId),
+        Variable<String>(message.signalId),
         Variable<DateTime>(threshold),
       ],
       readsFrom: const {},
@@ -248,7 +252,7 @@ class AppDatabase extends _$AppDatabase {
       VALUES (?, ?, ?, ?, ?, 0)
       ''',
       variables: [
-        Variable<String>(message.remoteId),
+        Variable<String>(message.signalId),
         Variable<double>(message.latitude),
         Variable<double>(message.longitude),
         Variable<int>(message.bloodTypeCode),
@@ -289,6 +293,100 @@ class AppDatabase extends _$AppDatabase {
       ''', readsFrom: const {}).get();
 
     return rows.map(_mapStoredSosMessage).toList(growable: false);
+  }
+
+  Future<int> pruneLegacyDuplicateScanRecords() async {
+    final rows = await customSelect(
+      '''
+      SELECT id, sender_mac, latitude, longitude, blood_type, timestamp, is_uploaded
+      FROM $_sosMessagesTableName
+      ORDER BY timestamp DESC
+      ''',
+      readsFrom: const {},
+    ).get();
+
+    final retainedByFingerprint = <String, StoredSosMessage>{};
+    final idsToDelete = <int>[];
+    final idsToMarkUploaded = <int>{};
+
+    for (final row in rows) {
+      final record = _mapStoredSosMessage(row);
+      if (!_looksLikeLegacyBleAddress(record.senderMac)) {
+        continue;
+      }
+
+      final fingerprint = _buildLegacyFingerprint(record);
+      final retained = retainedByFingerprint[fingerprint];
+      if (retained == null) {
+        retainedByFingerprint[fingerprint] = record;
+        continue;
+      }
+
+      final withinWindow =
+          retained.timestamp.difference(record.timestamp) <=
+          _legacyDuplicateWindow;
+      if (!withinWindow) {
+        retainedByFingerprint[fingerprint] = record;
+        continue;
+      }
+
+      idsToDelete.add(record.id);
+      if (record.isUploaded && !retained.isUploaded) {
+        idsToMarkUploaded.add(retained.id);
+        retainedByFingerprint[fingerprint] = StoredSosMessage(
+          id: retained.id,
+          senderMac: retained.senderMac,
+          latitude: retained.latitude,
+          longitude: retained.longitude,
+          bloodType: retained.bloodType,
+          timestamp: retained.timestamp,
+          isUploaded: true,
+        );
+      }
+    }
+
+    if (idsToDelete.isEmpty && idsToMarkUploaded.isEmpty) {
+      return 0;
+    }
+
+    await transaction(() async {
+      if (idsToMarkUploaded.isNotEmpty) {
+        final uploadPlaceholders = List.filled(
+          idsToMarkUploaded.length,
+          '?',
+        ).join(', ');
+        await customUpdate(
+          '''
+          UPDATE $_sosMessagesTableName
+          SET is_uploaded = 1
+          WHERE id IN ($uploadPlaceholders)
+          ''',
+          variables: idsToMarkUploaded
+              .map((id) => Variable<int>(id))
+              .toList(growable: false),
+          updates: const {},
+        );
+      }
+
+      if (idsToDelete.isNotEmpty) {
+        final deletePlaceholders = List.filled(idsToDelete.length, '?').join(
+          ', ',
+        );
+        await customUpdate(
+          '''
+          DELETE FROM $_sosMessagesTableName
+          WHERE id IN ($deletePlaceholders)
+          ''',
+          variables: idsToDelete
+              .map((id) => Variable<int>(id))
+              .toList(growable: false),
+          updates: const {},
+        );
+      }
+    });
+
+    unawaited(_notifyStoredMessagesChanged());
+    return idsToDelete.length;
   }
 
   Future<void> markAsUploaded(List<int> ids) async {
@@ -341,6 +439,16 @@ class AppDatabase extends _$AppDatabase {
     }
     final records = await getAllStoredSosMessages();
     _storedMessagesController.add(records);
+  }
+
+  bool _looksLikeLegacyBleAddress(String senderMac) {
+    return _bleAddressPattern.hasMatch(senderMac.trim());
+  }
+
+  String _buildLegacyFingerprint(StoredSosMessage record) {
+    final latitudeKey = record.latitude.toStringAsFixed(5);
+    final longitudeKey = record.longitude.toStringAsFixed(5);
+    return '$latitudeKey|$longitudeKey|${record.bloodType}';
   }
 
   @override

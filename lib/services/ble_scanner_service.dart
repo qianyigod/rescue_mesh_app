@@ -24,8 +24,6 @@ class BleScannerService extends ChangeNotifier {
   static const int rescueCompanyId = 0xFFFF;
   static const int _expectedPayloadLength = 14;
   static const int _legacyPayloadLength = 10;
-  static const Duration _duplicateSuppressionWindow = Duration(seconds: 30);
-
   final StreamController<models.SosMessage> _sosMessageController =
       StreamController<models.SosMessage>.broadcast();
 
@@ -34,7 +32,6 @@ class BleScannerService extends ChangeNotifier {
   StreamSubscription<CodedPhyScanResult>? _codedPhySubscription;
   Future<void>? _initFuture;
 
-  final Map<String, DateTime> _recentFingerprints = <String, DateTime>{};
   bool _supportsCodedPhy = false;
 
   BluetoothAdapterState _adapterState = BluetoothAdapterState.unknown;
@@ -81,7 +78,6 @@ class BleScannerService extends ChangeNotifier {
     }
 
     await stopScanning();
-    _recentFingerprints.clear();
 
     // 检查 Coded PHY 支持并启动并行扫描
     _supportsCodedPhy = await CodedPhyScanner.supportsCodedPhy();
@@ -453,26 +449,7 @@ class BleScannerService extends ChangeNotifier {
   }
 
   bool _shouldEmit(models.SosMessage message) {
-    final now = DateTime.now();
-    _recentFingerprints.removeWhere(
-      (_, timestamp) => now.difference(timestamp) > _duplicateSuppressionWindow,
-    );
-
-    final fingerprint = _buildFingerprint(message);
-    final lastSeen = _recentFingerprints[fingerprint];
-    if (lastSeen != null &&
-        now.difference(lastSeen) <= _duplicateSuppressionWindow) {
-      return false;
-    }
-
-    _recentFingerprints[fingerprint] = now;
     return true;
-  }
-
-  String _buildFingerprint(models.SosMessage message) {
-    return message.rawPayload
-        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-        .join();
   }
 
   BleMeshException _mapScanError(Object error) {

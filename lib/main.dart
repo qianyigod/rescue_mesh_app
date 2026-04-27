@@ -48,6 +48,15 @@ Future<void> main() async {
       })
       .catchError((_) => null);
 
+  await appDb
+      .pruneLegacyDuplicateScanRecords()
+      .then((removedCount) {
+        if (removedCount > 0) {
+          debugPrint('[Database] Removed $removedCount legacy duplicate SOS records.');
+        }
+      })
+      .catchError((_) => null);
+
   runApp(const ProviderScope(child: RescueApp()));
 }
 
@@ -89,8 +98,8 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     bleScannerService.addListener(_scannerStateListener);
     _syncScanState();
     _staleDeviceCleanupTimer = Timer.periodic(
-      const Duration(seconds: 10),
-      (_) => ref.read(meshStateProvider.notifier).removeStaleDevices(30),
+      const Duration(seconds: 2),
+      (_) => ref.read(meshStateProvider.notifier).removeStaleDevices(8),
     );
     _initializeServices();
   }
@@ -170,7 +179,12 @@ class _MainScreenState extends ConsumerState<MainScreen> {
     );
 
     _updateMeshState((notifier) {
-      notifier.addOrUpdateDevice(message.remoteId, payload, message.rssi);
+      notifier.addOrUpdateDevice(
+        message.signalId,
+        message.remoteId,
+        payload,
+        message.rssi,
+      );
     });
   }
 

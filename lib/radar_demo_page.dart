@@ -1,12 +1,14 @@
+// ignore_for_file: unused_element
+
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'models/mesh_state_provider.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_scanner_service.dart';
+import 'services/search_feedback_service.dart';
 import 'theme/rescue_theme.dart';
 import 'widgets/sonar_radar_widget.dart';
 
@@ -21,13 +23,12 @@ class RadarDemoPage extends ConsumerStatefulWidget {
 
 class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
   Timer? _feedbackTimer;
-  DateTime? _lastFeedbackAt;
-  DateTime? _lastHapticAt;
   String? _selectedDeviceId;
   bool _followNearest = true;
   bool _feedbackEnabled = true;
   DiscoveredDevice? _trackedDevice;
   bool _isScanning = false;
+  final SearchFeedbackService _searchFeedbackService = SearchFeedbackService();
 
   @override
   void initState() {
@@ -42,54 +43,24 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
   void didUpdateWidget(covariant RadarDemoPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (!widget.isActive && oldWidget.isActive) {
-      _lastFeedbackAt = null;
-      _lastHapticAt = null;
+      _searchFeedbackService.reset();
     }
   }
 
   @override
   void dispose() {
     _feedbackTimer?.cancel();
+    _searchFeedbackService.reset();
     super.dispose();
   }
 
   Future<void> _emitSearchFeedback() async {
-    final device = _trackedDevice;
-    if (!widget.isActive ||
-        !_feedbackEnabled ||
-        !_isScanning ||
-        device == null) {
-      _lastFeedbackAt = null;
-      _lastHapticAt = null;
-      return;
-    }
-
-    if (DateTime.now().difference(device.lastUpdatedAt) >
-        const Duration(seconds: 5)) {
-      _lastFeedbackAt = null;
-      _lastHapticAt = null;
-      return;
-    }
-
-    final profile = _feedbackProfileFor(device);
-    final now = DateTime.now();
-    if (_lastFeedbackAt != null &&
-        now.difference(_lastFeedbackAt!).inMilliseconds < profile.intervalMs) {
-      return;
-    }
-
-    _lastFeedbackAt = now;
-    unawaited(SystemSound.play(SystemSoundType.click));
-
-    if (!profile.enableHaptic) {
-      return;
-    }
-
-    if (_lastHapticAt == null ||
-        now.difference(_lastHapticAt!).inMilliseconds >= 500) {
-      _lastHapticAt = now;
-      unawaited(HapticFeedback.lightImpact());
-    }
+    await _searchFeedbackService.emitIfDue(
+      pageActive: widget.isActive,
+      feedbackEnabled: _feedbackEnabled,
+      isScanning: _isScanning,
+      trackedDevice: _trackedDevice,
+    );
   }
 
   Future<void> _toggleRadarScanning(BuildContext context, WidgetRef ref) async {
@@ -122,10 +93,9 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
   void _lockTarget(DiscoveredDevice device) {
     setState(() {
       _followNearest = false;
-      _selectedDeviceId = device.macAddress;
+      _selectedDeviceId = device.deviceId;
       _trackedDevice = device;
-      _lastFeedbackAt = null;
-      _lastHapticAt = null;
+      _searchFeedbackService.reset();
     });
   }
 
@@ -133,10 +103,9 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
     final next = devices.isEmpty ? null : devices.first;
     setState(() {
       _followNearest = true;
-      _selectedDeviceId = next?.macAddress;
+      _selectedDeviceId = next?.deviceId;
       _trackedDevice = next;
-      _lastFeedbackAt = null;
-      _lastHapticAt = null;
+      _searchFeedbackService.reset();
     });
   }
 
@@ -150,7 +119,7 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
     }
 
     for (final device in devices) {
-      if (device.macAddress == _selectedDeviceId) {
+      if (device.deviceId == _selectedDeviceId) {
         return device;
       }
     }
@@ -162,11 +131,11 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
     List<DiscoveredDevice> devices,
     DiscoveredDevice? trackedDevice,
   ) {
-    final nextId = trackedDevice?.macAddress;
+    final nextId = trackedDevice?.deviceId;
     final nextFollowNearest =
         devices.isEmpty ||
         _followNearest ||
-        !devices.any((device) => device.macAddress == _selectedDeviceId);
+        !devices.any((device) => device.deviceId == _selectedDeviceId);
 
     if (nextId == _selectedDeviceId && nextFollowNearest == _followNearest) {
       return;
@@ -179,8 +148,7 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
       setState(() {
         _followNearest = nextFollowNearest;
         _selectedDeviceId = nextId;
-        _lastFeedbackAt = null;
-        _lastHapticAt = null;
+        _searchFeedbackService.reset();
       });
     });
   }
@@ -192,7 +160,7 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
     final trackedDevice = _resolveTrackedDevice(devices);
     final profile = trackedDevice == null
         ? null
-        : _feedbackProfileFor(trackedDevice);
+        : SearchFeedbackProfile.fromDevice(trackedDevice);
 
     _trackedDevice = trackedDevice;
     _isScanning = meshState.isScanning;
@@ -235,14 +203,13 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
           const SizedBox(height: 16),
           _SearchPanel(
             isScanning: meshState.isScanning,
-            trackedDeviceId: trackedDevice?.macAddress,
+            trackedDeviceId: trackedDevice?.deviceId,
             guidance: profile?.guidance ?? '启动扫描后锁定一个目标，靠近时滴滴会自动变快。',
             feedbackEnabled: _feedbackEnabled,
             onFeedbackChanged: (enabled) {
               setState(() {
                 _feedbackEnabled = enabled;
-                _lastFeedbackAt = null;
-                _lastHapticAt = null;
+                _searchFeedbackService.reset();
               });
             },
           ),
@@ -259,7 +226,7 @@ class _RadarDemoPageState extends ConsumerState<RadarDemoPage> {
           const SizedBox(height: 16),
           _DeviceSection(
             devices: devices,
-            trackedDeviceId: trackedDevice?.macAddress,
+            trackedDeviceId: trackedDevice?.deviceId,
             followNearest: _followNearest,
             onTrackDevice: _lockTarget,
           ),
@@ -450,7 +417,7 @@ class _TrackingPanel extends StatelessWidget {
   });
 
   final DiscoveredDevice? device;
-  final _FeedbackProfile? profile;
+  final SearchFeedbackProfile? profile;
   final bool feedbackEnabled;
   final bool followNearest;
   final VoidCallback? onFollowNearest;
@@ -544,6 +511,16 @@ class _TrackingPanel extends StatelessWidget {
                     fontWeight: FontWeight.w800,
                   ),
                 ),
+                if (profile!.signalLost) ...[
+                  const SizedBox(height: 6),
+                  const Text(
+                    '最近几秒没有新包，当前为丢失信号补偿节奏。',
+                    style: TextStyle(
+                      color: RescuePalette.textMuted,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 6),
                 Text(
                   profile!.guidance,
@@ -618,9 +595,9 @@ class _DeviceSection extends StatelessWidget {
                 padding: const EdgeInsets.only(bottom: 12),
                 child: _DeviceCard(
                   device: device,
-                  isTracked: device.macAddress == trackedDeviceId,
+                  isTracked: device.deviceId == trackedDeviceId,
                   isAutoTracked:
-                      followNearest && device.macAddress == trackedDeviceId,
+                      followNearest && device.deviceId == trackedDeviceId,
                   onTrack: () => onTrackDevice(device),
                 ),
               ),
@@ -691,7 +668,7 @@ class _DeviceCard extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              device.macAddress,
+              device.sourceAddress,
               style: const TextStyle(
                 color: RescuePalette.textMuted,
                 fontSize: 12,
@@ -924,11 +901,11 @@ int _compareDevices(DiscoveredDevice a, DiscoveredDevice b) {
 }
 
 String _deviceTitle(DiscoveredDevice device) {
-  final parts = device.macAddress.split(':');
+  final parts = device.sourceAddress.split(':');
   if (parts.length >= 2) {
     return '终端 ${parts[parts.length - 2]}${parts.last}'.toUpperCase();
   }
-  return device.macAddress;
+  return device.sourceAddress;
 }
 
 String _formatDistance(DiscoveredDevice device) {

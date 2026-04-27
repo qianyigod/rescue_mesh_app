@@ -5,6 +5,8 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val amapApiKey: String = (project.findProperty("AMAP_API_KEY") as String?) ?: ""
+
 android {
     namespace = "cn.rescuemesh.app"
     compileSdk = flutter.compileSdkVersion
@@ -30,6 +32,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        manifestPlaceholders["AMAP_API_KEY"] = amapApiKey
     }
 
     buildTypes {

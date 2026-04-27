@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'services/offline_ai_guidance_service.dart';
 import 'theme/rescue_theme.dart';
 
 class AiChatPage extends StatefulWidget {
@@ -17,17 +18,13 @@ class AiChatPage extends StatefulWidget {
 }
 
 class _AiChatPageState extends State<AiChatPage> {
-  static const String _systemPrompt =
-      '你是一个离线急救助手。请优先给出简洁、可执行、安全的急救建议。'
-      '如果情况可能危及生命，请明确提醒用户尽快联系专业救援人员。';
-
   final List<Map<String, String>> _messages = [];
-  final List<RoleContent> _chatMessages = [
-    RoleContent(role: 'system', content: _systemPrompt),
-  ];
+  final List<RoleContent> _chatMessages = [];
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FCllama? _llama = FCllama.instance();
+  final OfflineAiGuidanceService _guidanceService =
+      const OfflineAiGuidanceService();
 
   StreamSubscription<Map<Object?, dynamic>>? _tokenSubscription;
   bool _isModelReady = false;
@@ -136,7 +133,9 @@ class _AiChatPageState extends State<AiChatPage> {
         _isInitializing = false;
         _initError = null;
       });
-      _upsertAssistantMessage('离线 AI 已就绪。请直接描述症状、伤情或现场情况。');
+      _upsertAssistantMessage(
+        '离线 AI 已就绪。请直接描述症状、伤情或现场情况，尽量带上呼吸、意识、出血、疼痛部位和开始时间。',
+      );
     } catch (error) {
       if (!mounted) {
         return;
@@ -169,10 +168,15 @@ class _AiChatPageState extends State<AiChatPage> {
       return;
     }
 
+    final guidance = _guidanceService.buildGuidance(
+      latestMessage: text,
+      previousUserMessages: _recentUserMessages(),
+    );
+
     setState(() {
       _isSending = true;
       _messages.add({'role': 'user', 'text': text});
-      _messages.add({'role': 'ai', 'text': '正在思考...'});
+      _messages.add({'role': 'ai', 'text': '正在整理更详细的急救建议...'});
     });
 
     _textController.clear();
@@ -181,7 +185,7 @@ class _AiChatPageState extends State<AiChatPage> {
     _responseBuffer = StringBuffer();
 
     try {
-      final prompt = _buildPrompt();
+      final prompt = _buildPrompt(guidance.systemPrompt);
       final result = await _llama?.completion(
         _contextId!,
         prompt: prompt,
@@ -199,7 +203,7 @@ class _AiChatPageState extends State<AiChatPage> {
                   .replaceAll('<|im_end|>', ''))
               .trim();
       final safeText = finalText.isEmpty
-          ? '我暂时没有生成有效内容，请换一种更具体的描述再试一次。'
+          ? guidance.fallbackReply
           : finalText;
 
       _chatMessages.add(RoleContent(role: 'assistant', content: safeText));
@@ -215,31 +219,58 @@ class _AiChatPageState extends State<AiChatPage> {
       if (!mounted) {
         return;
       }
+      final fallbackReply = guidance.fallbackReply;
+      _chatMessages.add(RoleContent(role: 'assistant', content: fallbackReply));
       setState(() {
-        _messages.last['text'] = '发送失败：$error';
+        _messages.last['text'] = fallbackReply;
       });
       _responseBuffer = null;
+    } finally {
+      _responseBuffer = null;
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+      }
     }
-    if (!mounted) {
-      return;
-    }
-    setState(() {
-      _isSending = false;
-    });
   }
 
-  String _buildPrompt() {
-    final buffer = StringBuffer();
-    for (final message in _chatMessages) {
-      buffer
-        ..write('<|im_start|>')
-        ..write(message.role)
-        ..write('\n')
-        ..write(message.content.trim())
-        ..write('\n<|im_end|>\n');
+  List<String> _recentUserMessages() {
+    final userMessages = _chatMessages
+        .where((message) => message.role == 'user')
+        .map((message) => message.content)
+        .toList(growable: false);
+
+    if (userMessages.length <= 4) {
+      return userMessages;
     }
+
+    return userMessages.sublist(userMessages.length - 4);
+  }
+
+  String _buildPrompt(String systemPrompt) {
+    final buffer = StringBuffer();
+    _appendPromptMessage(buffer, 'system', systemPrompt);
+
+    for (final message in _chatMessages) {
+      _appendPromptMessage(buffer, message.role, message.content);
+    }
+
     buffer.write('<|im_start|>assistant\n');
     return buffer.toString();
+  }
+
+  void _appendPromptMessage(
+    StringBuffer buffer,
+    String role,
+    String content,
+  ) {
+    buffer
+      ..write('<|im_start|>')
+      ..write(role)
+      ..write('\n')
+      ..write(content.trim())
+      ..write('\n<|im_end|>\n');
   }
 
   void _upsertAssistantMessage(String text) {
@@ -412,10 +443,10 @@ class _AiChatPageState extends State<AiChatPage> {
                       onSubmitted: (_) => _sendMessage(),
                       minLines: 1,
                       maxLines: 5,
-                      decoration: InputDecoration(
-                        hintText: _isModelReady
-                            ? '描述症状、伤情或当前现场情况...'
-                            : '正在准备模型，请稍候...',
+                        decoration: InputDecoration(
+                          hintText: _isModelReady
+                              ? '描述症状、伤情或现场情况，尽量写清呼吸、意识、出血和疼痛部位...'
+                              : '正在准备模型，请稍候...',
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 16,
                           vertical: 14,

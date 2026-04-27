@@ -25,6 +25,13 @@ class SosMessage {
   final DateTime receivedAt;
   final List<int> rawPayload;
 
+  String get signalId {
+    final payloadHex = rawPayload
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return '$companyId:$payloadHex';
+  }
+
   BloodType get bloodType {
     for (final type in BloodType.values) {
       if (type.code == bloodTypeCode) {

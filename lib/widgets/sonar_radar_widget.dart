@@ -107,14 +107,14 @@ class _SonarRadarWidgetState extends ConsumerState<SonarRadarWidget>
   Widget build(BuildContext context) {
     final meshState = ref.watch(meshStateProvider);
     final devices = meshState.activeDevices;
-    final activeDeviceIds = devices.map((d) => d.macAddress).toSet();
+    final activeDeviceIds = devices.map((d) => d.deviceId).toSet();
 
     _cleanupDeviceAnimations(activeDeviceIds);
     for (final device in devices) {
-      if (!_displayedDevices.contains(device.macAddress)) {
-        _displayedDevices.add(device.macAddress);
+      if (!_displayedDevices.contains(device.deviceId)) {
+        _displayedDevices.add(device.deviceId);
       }
-      _getOrCreateDeviceAnimationController(device.macAddress);
+      _getOrCreateDeviceAnimationController(device.deviceId);
     }
 
     const labelPadding = 20.0;
@@ -354,7 +354,7 @@ class RadarPainter extends CustomPainter {
 
   void _drawDeviceDots(Canvas canvas) {
     for (final device in devices) {
-      final fadeAnimation = deviceFadeAnimations[device.macAddress];
+      final fadeAnimation = deviceFadeAnimations[device.deviceId];
       if (fadeAnimation == null || fadeAnimation.value <= 0.01) {
         continue;
       }
@@ -369,7 +369,7 @@ class RadarPainter extends CustomPainter {
       final dotY =
           centerY + normalizedDistance * radius * math.sin(adjustedAngle);
 
-      final isTracked = device.macAddress == trackedDeviceId;
+      final isTracked = device.deviceId == trackedDeviceId;
       final (dotColor, dotSize) = _getDotProperties(
         device.rssi,
         opacity,
@@ -439,7 +439,7 @@ class RadarPainter extends CustomPainter {
       return math.atan2(lonDiff, latDiff);
     }
 
-    final hash = device.macAddress.hashCode;
+    final hash = device.deviceId.hashCode;
     return (hash % 360) * math.pi / 180;
   }
 

@@ -64,6 +64,15 @@ class PowerSavingManager extends ChangeNotifier with WidgetsBindingObserver {
   static const Duration _ultraBleAdvertiseInterval = Duration(seconds: 5);
   static const Duration _normalGpsUpdateInterval = Duration(seconds: 1);
   static const Duration _ultraGpsUpdateInterval = Duration(minutes: 5);
+  static const Duration _indoorFallbackFixTimeout = Duration(seconds: 6);
+  static const Duration _normalModeCacheMaxAge = Duration(minutes: 15);
+  static const String _cachedLatitudeKey = 'cached_latitude';
+  static const String _cachedLongitudeKey = 'cached_longitude';
+  static const String _cachedAccuracyKey = 'cached_accuracy';
+  static const String _cachedAltitudeKey = 'cached_altitude';
+  static const String _cachedSpeedKey = 'cached_speed';
+  static const String _cachedBearingKey = 'cached_bearing';
+  static const String _cachedTimestampKey = 'cached_timestamp';
   static const GpsUpdatePolicy _normalGpsPolicy = GpsUpdatePolicy(
     interval: _normalGpsUpdateInterval,
     accuracy: LocationAccuracy.high,
@@ -99,6 +108,21 @@ class PowerSavingManager extends ChangeNotifier with WidgetsBindingObserver {
   bool get isApplyingMode => _isApplyingMode;
   String? get lastBrightnessError => _lastBrightnessError;
   bool get hasRecentLocationCache => _hasFreshLocationCache();
+  DateTime? get cachedLocationUpdatedAt => _cachedLocationUpdatedAt;
+
+  LocationData? getCachedLocation({Duration? maxAge}) {
+    final cachedLocation = _cachedLocation;
+    final updatedAt = _cachedLocationUpdatedAt;
+    if (cachedLocation == null || updatedAt == null) {
+      return null;
+    }
+
+    if (maxAge != null && DateTime.now().difference(updatedAt) > maxAge) {
+      return null;
+    }
+
+    return cachedLocation;
+  }
 
   Future<void> initialize() {
     if (!_isObserverRegistered) {
@@ -115,6 +139,7 @@ class PowerSavingManager extends ChangeNotifier with WidgetsBindingObserver {
     _preferences ??= await _preferencesLoader();
     _isUltraPowerSavingMode =
         _preferences?.getBool(_ultraPowerSavingModeKey) ?? false;
+    _loadCachedLocationFromStorage();
     _isInitialized = true;
     await _applyBrightnessPolicy();
     notifyListeners();
@@ -178,9 +203,25 @@ class PowerSavingManager extends ChangeNotifier with WidgetsBindingObserver {
       return _cachedLocation!;
     }
 
-    final locationData = await locationClient.getLocation();
-    cacheLocationFix(locationData);
-    return locationData;
+    try {
+      final locationData = await locationClient.getLocation().timeout(
+        _indoorFallbackFixTimeout,
+      );
+      cacheLocationFix(locationData);
+      return locationData;
+    } on TimeoutException {
+      final fallbackLocation = getCachedLocation(maxAge: _cacheMaxAgeForMode());
+      if (fallbackLocation != null) {
+        return fallbackLocation;
+      }
+      rethrow;
+    } catch (_) {
+      final fallbackLocation = getCachedLocation(maxAge: _cacheMaxAgeForMode());
+      if (fallbackLocation != null) {
+        return fallbackLocation;
+      }
+      rethrow;
+    }
   }
 
   void cacheLocationFix(LocationData locationData) {
@@ -188,8 +229,16 @@ class PowerSavingManager extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
 
+    final updatedAt = DateTime.now();
     _cachedLocation = locationData;
-    _cachedLocationUpdatedAt = DateTime.now();
+    _cachedLocationUpdatedAt = updatedAt;
+    unawaited(_persistCachedLocation(locationData, updatedAt));
+  }
+
+  Duration _cacheMaxAgeForMode() {
+    return _isUltraPowerSavingMode
+        ? _ultraGpsUpdateInterval
+        : _normalModeCacheMaxAge;
   }
 
   bool _hasFreshLocationCache() {
@@ -198,7 +247,60 @@ class PowerSavingManager extends ChangeNotifier with WidgetsBindingObserver {
     }
 
     return DateTime.now().difference(_cachedLocationUpdatedAt!) <
-        _ultraGpsUpdateInterval;
+        _cacheMaxAgeForMode();
+  }
+
+  void _loadCachedLocationFromStorage() {
+    final prefs = _preferences;
+    if (prefs == null) {
+      return;
+    }
+
+    final latitude = prefs.getDouble(_cachedLatitudeKey);
+    final longitude = prefs.getDouble(_cachedLongitudeKey);
+    final timestampMs = prefs.getInt(_cachedTimestampKey);
+    if (latitude == null || longitude == null || timestampMs == null) {
+      return;
+    }
+
+    _cachedLocation = LocationData.fromMap({
+      'latitude': latitude,
+      'longitude': longitude,
+      'accuracy': prefs.getDouble(_cachedAccuracyKey),
+      'altitude': prefs.getDouble(_cachedAltitudeKey),
+      'speed': prefs.getDouble(_cachedSpeedKey),
+      'heading': prefs.getDouble(_cachedBearingKey),
+      'time': timestampMs.toDouble(),
+    });
+    _cachedLocationUpdatedAt = DateTime.fromMillisecondsSinceEpoch(timestampMs);
+  }
+
+  Future<void> _persistCachedLocation(
+    LocationData locationData,
+    DateTime updatedAt,
+  ) async {
+    final prefs = _preferences;
+    if (prefs == null) {
+      return;
+    }
+
+    await prefs.setDouble(_cachedLatitudeKey, locationData.latitude!);
+    await prefs.setDouble(_cachedLongitudeKey, locationData.longitude!);
+
+    if (locationData.accuracy != null) {
+      await prefs.setDouble(_cachedAccuracyKey, locationData.accuracy!);
+    }
+    if (locationData.altitude != null) {
+      await prefs.setDouble(_cachedAltitudeKey, locationData.altitude!);
+    }
+    if (locationData.speed != null) {
+      await prefs.setDouble(_cachedSpeedKey, locationData.speed!);
+    }
+    if (locationData.heading != null) {
+      await prefs.setDouble(_cachedBearingKey, locationData.heading!);
+    }
+
+    await prefs.setInt(_cachedTimestampKey, updatedAt.millisecondsSinceEpoch);
   }
 
   Future<void> _applyBrightnessPolicy() async {

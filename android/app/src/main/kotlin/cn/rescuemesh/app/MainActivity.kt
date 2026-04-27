@@ -15,7 +15,14 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
+import android.location.Location
+import android.location.LocationManager
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -27,12 +34,15 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
     private val broadcastChannelName = "rescue_mesh/advertiser"
     private val broadcastStateChannelName = "rescue_mesh/advertiser_state"
     private val scannerChannelName = "rescue_mesh/coded_phy_scanner"
+    private val domesticLocationChannelName = "cn.rescuemesh.location/domestic"
+    private val searchFeedbackChannelName = "rescue_mesh/search_feedback"
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var advertiseCallback: AdvertiseCallback? = null
     private var stateSink: EventChannel.EventSink? = null
     private var isBroadcasting = false
     private var pendingResult: MethodChannel.Result? = null
+    private var searchToneGenerator: ToneGenerator? = null
     
     // Coded PHY Scanner 相关
     private var scanner: BluetoothLeScanner? = null
@@ -71,7 +81,21 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
             broadcastStateChannelName,
         ).setStreamHandler(this)
         
-        // Coded PHY 扫描事件通道
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            domesticLocationChannelName,
+        ).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getCurrentFix" -> getDomesticLocationFix(call, result)
+                else -> result.notImplemented()
+            }
+        }
+
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            searchFeedbackChannelName,
+        ).setMethodCallHandler(::handleSearchFeedbackCall)
+
         EventChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             scannerChannelName,
@@ -119,9 +143,88 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
             else -> result.notImplemented()
         }
     }
+
+    private fun handleSearchFeedbackCall(call: MethodCall, result: MethodChannel.Result) {
+        when (call.method) {
+            "emitSearchPulse" -> emitSearchPulse(call, result)
+            "release" -> {
+                releaseSearchFeedback()
+                result.success(null)
+            }
+            else -> result.notImplemented()
+        }
+    }
     
     // SOS密集广播模式
     private var sosMode = false
+
+    private fun emitSearchPulse(call: MethodCall, result: MethodChannel.Result) {
+        val durationMs = (call.argument<Int>("durationMs") ?: 110).coerceIn(60, 400)
+        val enableHaptic = call.argument<Boolean>("enableHaptic") ?: false
+        val signalLost = call.argument<Boolean>("signalLost") ?: false
+
+        try {
+            val tone = ensureSearchToneGenerator()
+            val toneType = if (signalLost) {
+                ToneGenerator.TONE_PROP_ACK
+            } else {
+                ToneGenerator.TONE_PROP_BEEP2
+            }
+            tone.startTone(toneType, durationMs)
+
+            if (enableHaptic) {
+                vibrateSearchPulse(durationMs = if (signalLost) 35 else 55)
+            }
+
+            result.success(null)
+        } catch (e: Exception) {
+            result.error("feedback_failed", "Failed to emit search pulse.", e.message)
+        }
+    }
+
+    private fun ensureSearchToneGenerator(): ToneGenerator {
+        val existing = searchToneGenerator
+        if (existing != null) {
+            return existing
+        }
+
+        return ToneGenerator(AudioManager.STREAM_ALARM, 100).also {
+            searchToneGenerator = it
+        }
+    }
+
+    private fun vibrateSearchPulse(durationMs: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            val vibrator = vibratorManager?.defaultVibrator ?: return
+            vibrator.vibrate(
+                VibrationEffect.createOneShot(
+                    durationMs.toLong(),
+                    VibrationEffect.DEFAULT_AMPLITUDE,
+                ),
+            )
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(
+                VibrationEffect.createOneShot(
+                    durationMs.toLong(),
+                    VibrationEffect.DEFAULT_AMPLITUDE,
+                ),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(durationMs.toLong())
+        }
+    }
+
+    private fun releaseSearchFeedback() {
+        searchToneGenerator?.release()
+        searchToneGenerator = null
+    }
 
     private fun startSosBroadcast(call: MethodCall, result: MethodChannel.Result) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) {
@@ -591,9 +694,60 @@ class MainActivity : FlutterActivity(), EventChannel.StreamHandler {
         result.success(signals)
     }
 
+    private fun getDomesticLocationFix(call: MethodCall, result: MethodChannel.Result) {
+        val locationManager =
+            getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: run {
+                result.success(null)
+                return
+            }
+
+        val providers = listOf(
+            LocationManager.NETWORK_PROVIDER,
+            LocationManager.GPS_PROVIDER,
+            LocationManager.PASSIVE_PROVIDER,
+        )
+
+        val bestLocation = providers
+            .filter { provider ->
+                try {
+                    locationManager.isProviderEnabled(provider)
+                } catch (_: Exception) {
+                    false
+                }
+            }
+            .mapNotNull { provider ->
+                try {
+                    locationManager.getLastKnownLocation(provider)
+                } catch (_: SecurityException) {
+                    null
+                } catch (_: Exception) {
+                    null
+                }
+            }
+            .maxByOrNull { location -> location.time }
+
+        if (bestLocation == null) {
+            result.success(null)
+            return
+        }
+
+        result.success(
+            mapOf(
+                "latitude" to bestLocation.latitude,
+                "longitude" to bestLocation.longitude,
+                "accuracy" to bestLocation.accuracy.toDouble(),
+                "altitude" to bestLocation.altitude,
+                "speed" to bestLocation.speed.toDouble(),
+                "bearing" to bestLocation.bearing.toDouble(),
+                "provider" to (bestLocation.provider ?: "android_location"),
+            ),
+        )
+    }
+
     override fun onDestroy() {
         stopSosBroadcast()
         stopCodedPhyScan()
+        releaseSearchFeedback()
         accumulatorTimer?.cancel()
         accumulatorTimer = null
         synchronized(signalAccumulatorLock) {

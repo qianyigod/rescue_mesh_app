@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'offline_map_page.dart';
 import 'models/emergency_profile.dart';
-import 'models/sos_message.dart';
+import 'models/mesh_state_provider.dart';
 import 'services/ble_mesh_exceptions.dart';
 import 'services/ble_mesh_service.dart';
 import 'services/ble_scanner_service.dart';
@@ -11,7 +12,7 @@ import 'services/sos_trigger_service.dart';
 import 'theme/rescue_theme.dart';
 import 'widgets/sonar_radar_widget.dart';
 
-class MeshDashboardPage extends StatefulWidget {
+class MeshDashboardPage extends ConsumerStatefulWidget {
   MeshDashboardPage({
     super.key,
     BleMeshService? sosService,
@@ -25,17 +26,15 @@ class MeshDashboardPage extends StatefulWidget {
   final Future<void> Function()? onRadarRequested;
 
   @override
-  State<MeshDashboardPage> createState() => _MeshDashboardPageState();
+  ConsumerState<MeshDashboardPage> createState() => _MeshDashboardPageState();
 }
 
-class _MeshDashboardPageState extends State<MeshDashboardPage>
+class _MeshDashboardPageState extends ConsumerState<MeshDashboardPage>
     with TickerProviderStateMixin {
   late final AnimationController _pulseController;
   late final Listenable _servicesListenable;
 
   String? _actionStatus;
-  Stream<SosMessage>? _sosStream;
-
   @override
   void initState() {
     super.initState();
@@ -47,7 +46,6 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
       widget.sosService,
       widget.scannerService,
     ]);
-    _sosStream = widget.scannerService.sosMessageStream;
 
     widget.sosService.init().catchError((_) {});
     widget.scannerService.init().catchError((_) {});
@@ -194,6 +192,11 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
 
   @override
   Widget build(BuildContext context) {
+    final meshState = ref.watch(meshStateProvider);
+    final activeDevices = [...meshState.activeDevices]
+      ..sort((a, b) => b.lastUpdatedAt.compareTo(a.lastUpdatedAt));
+    final activeAlert = activeDevices.isEmpty ? null : activeDevices.first;
+
     return AnimatedBuilder(
       animation: _servicesListenable,
       builder: (context, _) {
@@ -367,20 +370,11 @@ class _MeshDashboardPageState extends State<MeshDashboardPage>
                   ),
                 ),
                 const SizedBox(height: 18),
-                StreamBuilder<SosMessage>(
-                  stream: _sosStream,
-                  builder: (context, snapshot) {
-                    if (!snapshot.hasData) {
-                      return const SizedBox.shrink();
-                    }
-
-                    final message = snapshot.data!;
-                    return _SosAlertCard(
-                      message: message,
-                      distanceText: _formatDistance(message.rssi),
-                    );
-                  },
-                ),
+                if (activeAlert != null)
+                  _SosAlertCard(
+                    device: activeAlert,
+                    distanceText: _formatDistance(activeAlert.rssi),
+                  ),
                 const SizedBox(height: 18),
                 if (_actionStatus != null ||
                     widget.sosService.lastError != null ||
@@ -512,10 +506,19 @@ class _StatusPill extends StatelessWidget {
 }
 
 class _SosAlertCard extends StatelessWidget {
-  const _SosAlertCard({required this.message, required this.distanceText});
+  const _SosAlertCard({required this.device, required this.distanceText});
 
-  final SosMessage message;
+  final DiscoveredDevice device;
   final String distanceText;
+
+  BloodType get bloodType {
+    for (final type in BloodType.values) {
+      if (type.code == device.payload.bloodType) {
+        return type;
+      }
+    }
+    return BloodType.unknown;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -594,18 +597,18 @@ class _SosAlertCard extends StatelessWidget {
               _AlertMetric(
                 icon: Icons.signal_cellular_alt,
                 label: '信号强度',
-                value: '${message.rssi} dBm',
+                value: '${device.rssi} dBm',
               ),
               _AlertMetric(
                 icon: Icons.bloodtype_outlined,
                 label: '血型',
-                value: message.bloodType.label,
+                value: bloodType.label,
               ),
               _AlertMetric(
                 icon: Icons.location_on_outlined,
                 label: '坐标',
                 value:
-                    '${message.latitude.toStringAsFixed(5)}, ${message.longitude.toStringAsFixed(5)}',
+                    '${device.payload.latitude.toStringAsFixed(5)}, ${device.payload.longitude.toStringAsFixed(5)}',
               ),
             ],
           ),
@@ -621,7 +624,7 @@ class _SosAlertCard extends StatelessWidget {
               children: [
                 Flexible(
                   child: Text(
-                    '设备: ${message.remoteId}',
+                    '设备: ${device.sourceAddress}',
                     style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                       color: RescuePalette.textPrimary,
                       fontWeight: FontWeight.w500,
@@ -630,7 +633,7 @@ class _SosAlertCard extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  _formatRelativeTime(message.receivedAt),
+                  _formatRelativeTime(device.lastUpdatedAt),
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: RescuePalette.textMuted,
                     fontWeight: FontWeight.w600,
